@@ -79,7 +79,7 @@ class VehicleAPI(VehicleBaseAPI):
     async def get_lbs_channel(self):
         if self.lbs_channel:
             return
-        
+
         async with self._lbs_channel_lock:
             if not self.lbs_channel:
                 self.lbs_channel = await self.gen_channel(GRPC_LBS_VOLVO_HOST)
@@ -490,9 +490,6 @@ class Vehicle(object):
 
         tasks = []
         await self._api.get_channel()
-        if not self.isAaos:
-            # 旧款车机（非安卓）增加强制刷新状态接口调用
-            await self._api.update_status(self.vin)
         async with asyncio.TaskGroup() as tg:
             funcs = [self._parse_exterior, self._parse_odometer,
                      self._parse_fuel, self._parse_availability,
