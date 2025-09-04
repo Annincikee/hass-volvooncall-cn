@@ -105,3 +105,4 @@ The integration supports a wide range of vehicle data and controls, including:
 - Vehicle position (with WGS84 coordinates)
 - Honk and flash commands
 - Various vehicle warnings (fluid levels, tire pressure, service warnings)
+- the README.md of this repo should use zh_CN
