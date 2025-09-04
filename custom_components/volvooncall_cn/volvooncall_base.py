@@ -72,6 +72,7 @@ class VehicleBaseAPI:
                 sign = sign_request(url, method, kwargs.get('body', None))
                 final_headers["x-sdk-date"] = sign['x-sdk-date']
                 final_headers["v587sign"] = sign['v587sign']
+                final_headers["User-Agent"] = 'vca-android'
 
                 async with self._session.request(
                         method,
