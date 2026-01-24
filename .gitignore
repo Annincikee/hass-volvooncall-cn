@@ -2,3 +2,11 @@
 __pycache__/
 /.agent-shell/
 /.direnv/
+
+# Testing
+.venv/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+/.local/
