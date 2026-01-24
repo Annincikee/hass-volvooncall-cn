@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -460,7 +461,7 @@ metaMap = {
         "icon": "mdi:connection",
         "unit": None,
         "entity_id": "connection_status",
-        "entity_category": "diagnostic",
+        "entity_category": EntityCategory.DIAGNOSTIC,
     },
 }
 
