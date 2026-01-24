@@ -1,6 +1,6 @@
 from datetime import timedelta
 import logging
-import async_timeout
+import asyncio
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -106,7 +106,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
         try:
             # Note: asyncio.TimeoutError and aiohttp.ClientError are already
             # handled by the data update coordinator.
-            async with async_timeout.timeout(30):
+            async with asyncio.timeout(30):
                 # Grab active context variables to limit data required to be fetched from API
                 # Note: using context is not required if there is no need or ability to limit
                 # data retrieved from API.
@@ -157,6 +157,7 @@ metaMap = {
         "icon": "mdi:ruler",
         "unit": "km",
         "entity_id": "distance_to_empty",
+        "state_class": "measurement",
     },
     "tail_gate_open": {
         "name": "Tail gate",
@@ -220,6 +221,7 @@ metaMap = {
         "icon": "mdi:speedometer",
         "unit": "km",
         "entity_id": "odometer",
+        "state_class": "total_increasing",
     },
     "front_left_window_open": {
         "name": "Front left window",
@@ -251,17 +253,19 @@ metaMap = {
     },
     "fuel_amount": {
         "name": "Fuel amount",
-        "device_class": "VOLUME_STORAGE",
+        "device_class": "volume_storage",
         "icon": "mdi:gas-station",
         "unit": "L",
         "entity_id": "fuel_amount",
+        "state_class": "measurement",
     },
     "fuel_average_consumption_liters_per_100_km": {
         "name": "Fuel average consumption liters per 100 km",
-        "device_class": "gas",
+        "device_class": None,
         "icon": "mdi:gas-station",
         "unit": "L/100km",
         "entity_id": "fuel_average_consumption_liters_per_100_km",
+        "state_class": "measurement",
     },
     # TODO
     # "fuel_amount_level": {

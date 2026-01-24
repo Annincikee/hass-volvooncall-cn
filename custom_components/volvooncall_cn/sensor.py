@@ -53,4 +53,7 @@ class VolvoSensor(VolvoEntity, SensorEntity):
         """Handle updated data from the coordinator."""
         self._attr_native_value = self.coordinator.data[self.idx].get(self.metaMapKey)
         self._attr_native_unit_of_measurement = metaMap[self.metaMapKey]["unit"]
+        # Set state_class if defined in metaMap
+        if "state_class" in metaMap[self.metaMapKey]:
+            self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
         self.async_write_ha_state()
