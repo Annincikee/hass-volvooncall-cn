@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": [
+    {
+      "vin": "TEST_VIN_12345678",
+      "vehicleName": "测试车辆",
+      "modelYear": 2024,
+      "model": "XC60",
+      "brand": "Volvo",
+      "color": "白色"
+    }
+  ],
+  "errCode": null,
+  "errMsg": null
+}
