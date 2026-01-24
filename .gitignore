@@ -1,3 +1,4 @@
 *~undo-tree~
 __pycache__/
 /.agent-shell/
+/.direnv/
