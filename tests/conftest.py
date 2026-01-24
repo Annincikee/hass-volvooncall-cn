@@ -170,7 +170,9 @@ def mock_volvo_api():
     """Create a mock VehicleAPI instance."""
     mock_api = AsyncMock()
     mock_api.login = AsyncMock()
+    mock_api.update_token = AsyncMock()
     mock_api.get_vehicles = AsyncMock(return_value=[])
+    mock_api.get_vehicles_vins = AsyncMock(return_value={})
     mock_api._refresh_token = "mock_refresh_token"
     mock_api._digitalvolvo_access_token = "mock_access_token"
     mock_api._vocapi_access_token = "mock_vocapi_token"
