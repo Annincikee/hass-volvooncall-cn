@@ -460,13 +460,7 @@ metaMap = {
         "icon": "mdi:connection",
         "unit": None,
         "entity_id": "connection_status",
-    },
-    "last_update_time": {
-        "name": "Last Successful Update",
-        "device_class": "timestamp",
-        "icon": "mdi:clock-check-outline",
-        "unit": None,
-        "entity_id": "last_update_time",
+        "entity_category": "diagnostic",
     },
 }
 
@@ -482,6 +476,11 @@ class VolvoEntity(CoordinatorEntity):
     @property
     def icon(self):
         return metaMap[self.metaMapKey]["icon"]
+    
+    @property
+    def name(self):
+        """Return the name of the sensor."""
+        return metaMap[self.metaMapKey]["name"]
 
     @property
     def device_class(self):
