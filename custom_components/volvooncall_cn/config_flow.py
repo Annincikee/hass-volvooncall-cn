@@ -57,9 +57,6 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry):
-        self.config_entry = config_entry
-
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()
 
