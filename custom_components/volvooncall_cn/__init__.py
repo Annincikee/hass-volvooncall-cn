@@ -477,11 +477,6 @@ class VolvoEntity(CoordinatorEntity):
     @property
     def icon(self):
         return metaMap[self.metaMapKey]["icon"]
-    
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return metaMap[self.metaMapKey]["name"]
 
     @property
     def device_class(self):
