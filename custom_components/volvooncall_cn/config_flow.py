@@ -37,7 +37,7 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(entry: config_entries.ConfigEntry):
-        return VolvoOnCallCnOptionsFlow(entry)
+        return VolvoOnCallCnOptionsFlow()
 
     async def async_step_user(self, user_input):
         errors = {}
