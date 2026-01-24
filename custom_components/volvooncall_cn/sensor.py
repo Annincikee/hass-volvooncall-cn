@@ -30,8 +30,7 @@ async def async_setup_entry(
         entities.append(VolvoSensor(coordinator, idx, "fuel_amount"))
         entities.append(VolvoSensor(coordinator, idx, "fuel_average_consumption_liters_per_100_km"))
         entities.append(VolvoSensor(coordinator, idx, "service_warning_msg"))
-        entities.append(VolvoSensor(coordinator, idx, "connection_status"))
-        entities.append(VolvoTimestampSensor(coordinator, idx, "last_update_time"))
+        entities.append(VolvoConnectionStatusSensor(coordinator, idx, "connection_status"))
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
 
     async_add_entities(entities)
@@ -59,21 +58,30 @@ class VolvoSensor(VolvoEntity, SensorEntity):
         # Set state_class if defined in metaMap
         if "state_class" in metaMap[self.metaMapKey]:
             self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
+        # Set entity_category if defined in metaMap
+        if "entity_category" in metaMap[self.metaMapKey]:
+            self._attr_entity_category = metaMap[self.metaMapKey]["entity_category"]
         self.async_write_ha_state()
 
 
-class VolvoTimestampSensor(VolvoEntity, SensorEntity):
-    """Sensor for timestamp values."""
+class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
+    """Sensor for connection status with last update time as attribute."""
 
     def __init__(self, coordinator, idx, metaMapKey):
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
-        self._attr_device_class = "timestamp"
+        # Set entity_category to diagnostic
+        self._attr_entity_category = "diagnostic"
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        value = self.coordinator.data[self.idx].get(self.metaMapKey)
-        if isinstance(value, datetime):
-            self._attr_native_value = value
+        vehicle = self.coordinator.data[self.idx]
+        self._attr_native_value = vehicle.connection_status
+        # Add last_update_time as an attribute
+        self._attr_extra_state_attributes = {
+            "last_update_time": vehicle.last_update_time.isoformat() if vehicle.last_update_time else None,
+            "consecutive_failures": vehicle._consecutive_failures,
+            "cache_info": vehicle.get_cache_info(),
+        }
         self.async_write_ha_state()
