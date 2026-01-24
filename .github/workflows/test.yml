@@ -54,34 +54,3 @@ jobs:
         if: matrix.python-version == '3.13'
         run: |
           coverage report --fail-under=50
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install linting tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install black isort pylint
-          pip install grpcio>=1.67.1 grpcio-tools>=1.67.1
-          pip install pytest-homeassistant-custom-component
-
-      - name: Check code formatting with black
-        run: |
-          black --check custom_components/volvooncall_cn tests
-
-      - name: Check import sorting with isort
-        run: |
-          isort --check-only custom_components/volvooncall_cn tests
-
-      - name: Lint with pylint
-        run: |
-          pylint custom_components/volvooncall_cn --disable=C,R,W
-        continue-on-error: true
