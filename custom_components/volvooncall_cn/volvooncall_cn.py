@@ -2,7 +2,7 @@ import logging
 import datetime
 import grpc
 import asyncio
-from datetime import datetime as dt, timedelta
+from datetime import datetime as dt, timedelta, timezone
 from typing import Dict, Any, Optional
 import copy
 from .volvooncall_base import VehicleBaseAPI, gcj02towgs84
@@ -356,7 +356,7 @@ class Vehicle(object):
         # Caching infrastructure for resilience
         self._cache: Dict[str, Any] = {}  # Stores last known good values
         self._cache_timestamp: Dict[str, dt] = {}  # Timestamps for each data source
-        self._last_successful_update = dt.now()
+        self._last_successful_update = dt.now(timezone.utc)
         self._consecutive_failures = 0
         self._data_source_status: Dict[str, bool] = {
             "exterior": True,
@@ -373,8 +373,10 @@ class Vehicle(object):
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
         """Save successful data to cache."""
         self._cache[source] = copy.deepcopy(data_dict)
-        self._cache_timestamp[source] = dt.now()
+        self._cache_timestamp[source] = dt.now(timezone.utc)
+        self._last_successful_update = dt.now(timezone.utc)
         self._data_source_status[source] = True
+        self._consecutive_failures = 0
         _LOGGER.debug(f"Cached {source} data for VIN {self.vin}")
     
     def _restore_from_cache(self, source: str) -> bool:
@@ -383,7 +385,7 @@ class Vehicle(object):
             return False
         
         # Check if cache is not too old (1 hour default)
-        cache_age = dt.now() - self._cache_timestamp.get(source, dt.min)
+        cache_age = dt.now(timezone.utc) - self._cache_timestamp.get(source, dt.min.replace(tzinfo=timezone.utc))
         if cache_age > timedelta(hours=1):
             _LOGGER.warning(f"Cache for {source} is too old ({cache_age}), not restoring")
             return False
@@ -650,7 +652,7 @@ class Vehicle(object):
 
     async def _parse_car_preference(self):
         try:
-            preference_resp: GetPreferencesResp = await self._api.get_car_preference(self.vin)
+            preference_resp: GetPreferencesResp = await self._api.get_car_preferences(self.vin)
             _LOGGER.debug(preference_resp)
             
             # Build data dict
