@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.const import Platform
 
 from . import VolvoCoordinator, VolvoEntity, metaMap
@@ -71,7 +71,7 @@ class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
         # Set entity_category to diagnostic
-        self._attr_entity_category = "diagnostic"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @callback
     def _handle_coordinator_update(self) -> None:
