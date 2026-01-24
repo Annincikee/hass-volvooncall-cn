@@ -143,7 +143,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
                     try:
                         await vehicle.update()
                         vehicle._consecutive_failures = 0
-                        vehicle._last_successful_update = datetime.now()
+                        # Note: _last_successful_update is updated by _save_to_cache() in each parse method
                     except Exception as err:
                         vehicle._consecutive_failures += 1
                         _LOGGER.error(
