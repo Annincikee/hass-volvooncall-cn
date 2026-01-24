@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -29,6 +30,8 @@ async def async_setup_entry(
         entities.append(VolvoSensor(coordinator, idx, "fuel_amount"))
         entities.append(VolvoSensor(coordinator, idx, "fuel_average_consumption_liters_per_100_km"))
         entities.append(VolvoSensor(coordinator, idx, "service_warning_msg"))
+        entities.append(VolvoSensor(coordinator, idx, "connection_status"))
+        entities.append(VolvoTimestampSensor(coordinator, idx, "last_update_time"))
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
 
     async_add_entities(entities)
@@ -56,4 +59,21 @@ class VolvoSensor(VolvoEntity, SensorEntity):
         # Set state_class if defined in metaMap
         if "state_class" in metaMap[self.metaMapKey]:
             self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
+        self.async_write_ha_state()
+
+
+class VolvoTimestampSensor(VolvoEntity, SensorEntity):
+    """Sensor for timestamp values."""
+
+    def __init__(self, coordinator, idx, metaMapKey):
+        """Pass coordinator to CoordinatorEntity."""
+        super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
+        self._attr_device_class = "timestamp"
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        value = self.coordinator.data[self.idx].get(self.metaMapKey)
+        if isinstance(value, datetime):
+            self._attr_native_value = value
         self.async_write_ha_state()
