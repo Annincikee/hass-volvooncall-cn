@@ -1,6 +1,6 @@
 import logging
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 from urllib.parse import urljoin
 import asyncio
 import time
@@ -273,7 +273,7 @@ def format_auth_header(signature, access_key, signed_headers):
 
 
 def generate_date_stamp():
-    return datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def sign_request(url, method, body):
