@@ -68,7 +68,12 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        self._config_entry = config_entry
+
+    @property
+    def config_entry(self):
+        # 优先用基类提供的，回退到我们传入的
+        return getattr(super(), 'config_entry', self._config_entry)
 
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()
