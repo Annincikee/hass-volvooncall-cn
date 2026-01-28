@@ -42,9 +42,19 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input):
         errors = {}
         if user_input is not None:
-            await self.async_set_unique_id(user_input[CONF_USERNAME])
             username = user_input.get(CONF_USERNAME, "")
             password = user_input.get(CONF_PASSWORD, "")
+            
+            # Validate non-empty username and password
+            if not username:
+                raise vol.Invalid("Username cannot be empty")
+            if not password:
+                raise vol.Invalid("Password cannot be empty")
+            
+            # Set unique_id and check for duplicates
+            await self.async_set_unique_id(username)
+            self._abort_if_unique_id_configured()
+            
             errors = await volvo_validation(self.hass, username, password)
             if not errors:
                 return self.async_create_entry(title=username, data=user_input)
@@ -57,8 +67,13 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry):
-        self.config_entry = config_entry
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._config_entry = config_entry
+
+    @property
+    def config_entry(self):
+        # 优先用基类提供的，回退到我们传入的
+        return getattr(super(), 'config_entry', self._config_entry)
 
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()

@@ -1,0 +1,8 @@
+{
+  "success": true,
+  "data": {
+    "token": "mock_vocapi_access_token_xyz"
+  },
+  "errCode": null,
+  "errMsg": null
+}
