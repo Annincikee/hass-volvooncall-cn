@@ -1,12 +1,14 @@
 from datetime import timedelta
 import logging
-import async_timeout
+import asyncio
+from datetime import datetime
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -96,39 +98,85 @@ class VolvoCoordinator(DataUpdateCoordinator):
         )
         self.volvo_api = volvo_api
         self.store_datas = []
+        # Connection health tracking
+        self._consecutive_failures = 0
+        self._last_failure_reason = None
+
+
+    async def _retry_with_backoff(self, func, max_retries=2, initial_delay=1.0):
+        """Retry a function with exponential backoff."""
+        delay = initial_delay
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                return await func()
+            except Exception as err:
+                last_error = err
+                if attempt < max_retries:
+                    _LOGGER.warning(
+                        f"Attempt {attempt + 1}/{max_retries + 1} failed: {err}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    _LOGGER.error(f"All {max_retries + 1} attempts failed: {err}")
+                    raise last_error
 
     async def _async_update_data(self):
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
+        """Fetch data from API endpoint with retry and caching support."""
         try:
-            # Note: asyncio.TimeoutError and aiohttp.ClientError are already
-            # handled by the data update coordinator.
-            async with async_timeout.timeout(30):
-                # Grab active context variables to limit data required to be fetched from API
-                # Note: using context is not required if there is no need or ability to limit
-                # data retrieved from API.
-                await self.volvo_api.login()
-                await self.volvo_api.update_token()
+            async with asyncio.timeout(30):
+                # Retry login and token update
+                await self._retry_with_backoff(self.volvo_api.login, max_retries=2)
+                await self._retry_with_backoff(self.volvo_api.update_token, max_retries=2)
+                
                 vinVehicleMaps = await self.volvo_api.get_vehicles_vins()
                 vehicles = []
+                
                 for vin, vehicleInfos in vinVehicleMaps.items():
                     modelYear = int(vehicleInfos.get("modelYear", 2020))
                     isAaos = modelYear >= 2022
                     vehicle = Vehicle(vin, self.volvo_api, isAaos)
-                    await vehicle.update()
+                    
+                    # Try to update, but don't fail completely
+                    try:
+                        await vehicle.update()
+                        vehicle._consecutive_failures = 0
+                        # Note: _last_successful_update is updated by _save_to_cache() in each parse method
+                    except Exception as err:
+                        vehicle._consecutive_failures += 1
+                        _LOGGER.error(
+                            f"Failed to update vehicle {vin} (failure #{vehicle._consecutive_failures}): {err}"
+                        )
+                        # Don't raise - continue with cached data
+                    
                     vehicles.append(vehicle)
 
                     store_data = VolvoStore(self.hass, vin)
                     await store_data.load_create_data()
                     self.store_datas.append(store_data)
 
+                # Track successful update
+                self._consecutive_failures = 0
                 return vehicles
+                
         except Exception as err:
+            # Track failure but still return vehicles with cache
+            self._consecutive_failures += 1
+            self._last_failure_reason = str(err)
+            _LOGGER.error(
+                f"Coordinator update failed (failure #{self._consecutive_failures}): {err}"
+            )
+            
+            # If we have existing data (vehicles from previous update), return it
+            if self.data:
+                _LOGGER.warning("Returning cached vehicle data due to update failure")
+                return self.data
+            
+            # Only raise if we have no data at all (first load)
             raise UpdateFailed(f"Error communicating with API: {err}")
-
 
 metaMap = {
     "car_lock": {
@@ -157,6 +205,7 @@ metaMap = {
         "icon": "mdi:ruler",
         "unit": "km",
         "entity_id": "distance_to_empty",
+        "state_class": "measurement",
     },
     "tail_gate_open": {
         "name": "Tail gate",
@@ -220,6 +269,7 @@ metaMap = {
         "icon": "mdi:speedometer",
         "unit": "km",
         "entity_id": "odometer",
+        "state_class": "total_increasing",
     },
     "front_left_window_open": {
         "name": "Front left window",
@@ -251,17 +301,19 @@ metaMap = {
     },
     "fuel_amount": {
         "name": "Fuel amount",
-        "device_class": "VOLUME_STORAGE",
+        "device_class": "volume_storage",
         "icon": "mdi:gas-station",
         "unit": "L",
         "entity_id": "fuel_amount",
+        "state_class": "measurement",
     },
     "fuel_average_consumption_liters_per_100_km": {
         "name": "Fuel average consumption liters per 100 km",
-        "device_class": "gas",
+        "device_class": None,
         "icon": "mdi:gas-station",
         "unit": "L/100km",
         "entity_id": "fuel_average_consumption_liters_per_100_km",
+        "state_class": "measurement",
     },
     # TODO
     # "fuel_amount_level": {
@@ -402,7 +454,15 @@ metaMap = {
         "icon": "mdi:car-tire-alert",
         "unit": None,
         "entity_id": "rear_right_tyre_pressure_warning",
-    }
+    },
+    "connection_status": {
+        "name": "Connection Status",
+        "device_class": None,
+        "icon": "mdi:connection",
+        "unit": None,
+        "entity_id": "connection_status",
+        "entity_category": EntityCategory.DIAGNOSTIC,
+    },
 }
 
 

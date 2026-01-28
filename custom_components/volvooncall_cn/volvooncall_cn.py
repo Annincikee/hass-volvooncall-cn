@@ -2,6 +2,9 @@ import logging
 import datetime
 import grpc
 import asyncio
+from datetime import datetime as dt, timedelta, timezone
+from typing import Dict, Any, Optional
+import copy
 from .volvooncall_base import VehicleBaseAPI, gcj02towgs84
 from .proto.exterior_pb2_grpc import ExteriorServiceStub
 from .proto.exterior_pb2 import GetExteriorReq, GetExteriorResp, ExteriorStatus
@@ -350,57 +353,158 @@ class Vehicle(object):
         self.rear_right_tyre_pressure_warning = False
         self.nickname = ""
 
+        # Caching infrastructure for resilience
+        self._cache: Dict[str, Any] = {}  # Stores last known good values
+        self._cache_timestamp: Dict[str, dt] = {}  # Timestamps for each data source
+        self._last_successful_update = dt.now(timezone.utc)
+        self._consecutive_failures = 0
+        self._data_source_status: Dict[str, bool] = {
+            "exterior": True,
+            "fuel": True,
+            "odometer": True,
+            "health": True,
+            "location": True,
+            "availability": True,
+            "engine_status": True,
+            "preference": True,
+        }
+
+
+    def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
+        """Save successful data to cache."""
+        self._cache[source] = copy.deepcopy(data_dict)
+        self._cache_timestamp[source] = dt.now(timezone.utc)
+        self._last_successful_update = dt.now(timezone.utc)
+        self._data_source_status[source] = True
+        self._consecutive_failures = 0
+        _LOGGER.debug(f"Cached {source} data for VIN {self.vin}")
+    
+    def _restore_from_cache(self, source: str) -> bool:
+        """Restore data from cache if available and not too old."""
+        if source not in self._cache:
+            return False
+        
+        # Check if cache is not too old (1 hour default)
+        cache_age = dt.now(timezone.utc) - self._cache_timestamp.get(source, dt.min.replace(tzinfo=timezone.utc))
+        if cache_age > timedelta(hours=1):
+            _LOGGER.warning(f"Cache for {source} is too old ({cache_age}), not restoring")
+            return False
+        
+        # Restore cached values
+        cached_data = self._cache[source]
+        for key, value in cached_data.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        
+        _LOGGER.info(f"Restored {source} from cache (age: {cache_age}) for VIN {self.vin}")
+        return True
+    
+    def get_cache_info(self) -> Dict[str, Any]:
+        """Get cache status for diagnostics."""
+        return {
+            "last_update": self._last_successful_update,
+            "consecutive_failures": self._consecutive_failures,
+            "data_sources": self._data_source_status.copy(),
+            "cached_sources": list(self._cache.keys()),
+        }
+    
+    @property
+    def connection_status(self) -> str:
+        """Return connection status for diagnostic sensor."""
+        if self._consecutive_failures == 0:
+            return "Connected"
+        elif self._consecutive_failures < 3:
+            failed_sources = [k for k, v in self._data_source_status.items() if not v]
+            return f"Degraded ({len(failed_sources)} sources failed)"
+        else:
+            return f"Disconnected ({self._consecutive_failures} failures)"
+    
+    @property
+    def last_update_time(self) -> dt:
+        """Return last successful update time for diagnostic sensor."""
+        return self._last_successful_update
+
     async def _parse_exterior(self):
         try:
             exterior_resp: GetExteriorResp = await self._api.get_exterior(self.vin)
             exterior_status: ExteriorStatus = exterior_resp.data
             _LOGGER.debug(exterior_status)
+            
+            # Build data dict before setting attributes
+            data = {
+                "car_locked": exterior_status.central_lock == LockStatus.LOCK_STATUS_LOCKED,
+                "front_left_door_open": isWindowOpen(exterior_status.front_left_door),
+                "front_right_door_open": isWindowOpen(exterior_status.front_right_door),
+                "rear_left_door_open": isWindowOpen(exterior_status.rear_left_door),
+                "rear_right_door_open": isWindowOpen(exterior_status.rear_right_door),
+                "sunroof_open": isWindowOpen(exterior_status.sunroof),
+                "tail_gate_open": isWindowOpen(exterior_status.tailgate),
+                "hood_open": isWindowOpen(exterior_status.hood),
+                "tank_lid_open": isWindowOpen(exterior_status.tank_lid),
+            }
+            
+            # Handle window sensors
+            window_sensors = ["front_left_window", "front_right_window", "rear_left_window", "rear_right_window"]
+            for window_sensor in window_sensors:
+                status = getattr(exterior_status, window_sensor)
+                openkey = window_sensor + "_open"
+                ajarkey = window_sensor + "_open_ajar"
+                if status == OpenStatus.OPEN_STATUS_OPEN:
+                    data[openkey] = True
+                    data[ajarkey] = False
+                elif status == OpenStatus.OPEN_STATUS_AJAR:
+                    data[openkey] = True
+                    data[ajarkey] = True
+                else:
+                    data[openkey] = False
+                    data[ajarkey] = False
+            
+            # Set attributes from data dict
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("exterior", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse exterior for VIN {self.vin}: {err}")
+            self._data_source_status["exterior"] = False
+            # Try to restore from cache
+            if not self._restore_from_cache("exterior"):
+                _LOGGER.warning(f"No cache available for exterior data on VIN {self.vin}")
             return
-        self.car_locked = exterior_status.central_lock == LockStatus.LOCK_STATUS_LOCKED
-        self.front_left_door_open = isWindowOpen(exterior_status.front_left_door)
-        self.front_right_door_open = isWindowOpen(exterior_status.front_right_door)
-        self.rear_left_door_open = isWindowOpen(exterior_status.rear_left_door)
-        self.rear_right_door_open = isWindowOpen(exterior_status.rear_right_door)
-        self.sunroof_open = isWindowOpen(exterior_status.sunroof)
-        self.tail_gate_open = isWindowOpen(exterior_status.tailgate)
-        self.hood_open = isWindowOpen(exterior_status.hood)
-        self.tank_lid_open = isWindowOpen(exterior_status.tank_lid)
-        window_sensors = ["front_left_window", "front_right_window", "rear_left_window", "rear_right_window"]
-        for window_sensor in window_sensors:
-            status = getattr(exterior_status, window_sensor)
-            openkey = window_sensor + "_open"
-            ajarkey = window_sensor + "_open_ajar"
-            if status == OpenStatus.OPEN_STATUS_OPEN:
-                setattr(self, openkey, True)
-                setattr(self, ajarkey, False)
-            elif status == OpenStatus.OPEN_STATUS_AJAR:
-                setattr(self, openkey, True)
-                setattr(self, ajarkey, True)
-            else:
-                setattr(self, openkey, False)
-                setattr(self, ajarkey, False)
 
     async def _parse_health(self):
         try:
             health_resp: GetHealthResp = await self._api.get_health(self.vin)
             health_status: HealthStatus = health_resp.data
 
-            # Set the service_warning field based on the enum value
-            self.service_warning_msg = health_status.service_warning
-            self.service_warning = health_status.service_warning > 1
-            self.brake_fluid_level_warning = health_status.brake_fluid_level_warning > 1
-            self.engine_coolant_level_warning = health_status.engine_coolant_level_warning > 1
-            self.oil_level_warning = health_status.oil_level_warning > 1
-            self.washer_fluid_level_warning = health_status.washer_fluid_level_warning > 1
-            self.front_left_tyre_pressure_warning = health_status.front_left_tyre_pressure_warning > 1
-            self.front_right_tyre_pressure_warning = health_status.front_right_tyre_pressure_warning > 1
-            self.rear_left_tyre_pressure_warning = health_status.rear_left_tyre_pressure_warning > 1
-            self.rear_right_tyre_pressure_warning = health_status.rear_right_tyre_pressure_warning > 1
+            # Build data dict
+            data = {
+                "service_warning_msg": health_status.service_warning,
+                "service_warning": health_status.service_warning > 1,
+                "brake_fluid_level_warning": health_status.brake_fluid_level_warning > 1,
+                "engine_coolant_level_warning": health_status.engine_coolant_level_warning > 1,
+                "oil_level_warning": health_status.oil_level_warning > 1,
+                "washer_fluid_level_warning": health_status.washer_fluid_level_warning > 1,
+                "front_left_tyre_pressure_warning": health_status.front_left_tyre_pressure_warning > 1,
+                "front_right_tyre_pressure_warning": health_status.front_right_tyre_pressure_warning > 1,
+                "rear_left_tyre_pressure_warning": health_status.rear_left_tyre_pressure_warning > 1,
+                "rear_right_tyre_pressure_warning": health_status.rear_right_tyre_pressure_warning > 1,
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("health", data)
 
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse health for VIN {self.vin}: {err}")
+            self._data_source_status["health"] = False
+            if not self._restore_from_cache("health"):
+                _LOGGER.warning(f"No cache available for health data on VIN {self.vin}")
             return
 
     async def _parse_fuel(self):
@@ -408,78 +512,167 @@ class Vehicle(object):
             fuel_resp: GetFuelResp = await self._api.get_fuel_status(self.vin)
             fuel_data = fuel_resp.data
             _LOGGER.debug(fuel_data)
+            
+            # Build data dict
+            data = {
+                "fuel_amount": round(fuel_data.fuelAmount, 2),
+                "distance_to_empty": fuel_data.distanceToEmptyKm,
+                "fuel_average_consumption_liters_per_100_km": fuel_data.TMFuelAvgConsum,
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("fuel", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse fuel for VIN {self.vin}: {err}")
+            self._data_source_status["fuel"] = False
+            if not self._restore_from_cache("fuel"):
+                _LOGGER.warning(f"No cache available for fuel data on VIN {self.vin}")
             return
-        self.fuel_amount = round(fuel_data.fuelAmount, 2)
-        self.distance_to_empty = fuel_data.distanceToEmptyKm
-        self.fuel_average_consumption_liters_per_100_km = fuel_data.TMFuelAvgConsum
-        # self.fuel_amount_level = fuel_data.fluelHalfLevel / 5
 
     async def _parse_odometer(self):
         try:
             odometer_resp: GetOdometerResp = await self._api.get_odometer(self.vin)
             odometer_data = odometer_resp.data
             _LOGGER.debug(odometer_data)
+            
+            # Build data dict
+            data = {
+                "odo_meter": odometer_data.odometerMeters / 1000,
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("odometer", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse odometer for VIN {self.vin}: {err}")
+            self._data_source_status["odometer"] = False
+            if not self._restore_from_cache("odometer"):
+                _LOGGER.warning(f"No cache available for odometer data on VIN {self.vin}")
             return
-        self.odo_meter = odometer_data.odometerMeters / 1000
 
     async def _parse_availability(self):
         try:
             availability_resp: GetAvailabilityResp = await self._api.get_availability(self.vin)
             availability_data = availability_resp.data
             _LOGGER.debug(availability_data)
+            
+            # Build data dict
+            data = {
+                "availability_status": availability_data.availableStatus,
+                "unavailable_reason": availability_data.unavailableReason,
+                "engine_running": (availability_data.availableStatus == AvailabilityStatus.Unavailable 
+                                 and availability_data.unavailableReason == AvailabilityReason.CarInUse),
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("availability", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse availability for VIN {self.vin}: {err}")
+            self._data_source_status["availability"] = False
+            if not self._restore_from_cache("availability"):
+                _LOGGER.warning(f"No cache available for availability data on VIN {self.vin}")
             return
-        self.availability_status = availability_data.availableStatus
-        self.unavailable_reason = availability_data.unavailableReason
-        self.engine_running = self.availability_status == AvailabilityStatus.Unavailable and self.unavailable_reason == AvailabilityReason.CarInUse
 
     async def _parse_location(self):
         try:
             location_resp: StreamLastKnownLocationsResp = await self._api.get_location(self.vin)
-        except Exception as err:
-            _LOGGER.error(err)
-            return
-        self.position = {
-            "latitude": location_resp.latitude,
-            "longitude": location_resp.longitude,
-        }
-        wgs84_data = gcj02towgs84(self.position["longitude"], self.position["latitude"])
-        if len(wgs84_data) >= 2:
-            self.position_wgs84 = {
-                "longitude": wgs84_data[0],
-                "latitude": wgs84_data[1],
+            
+            # Build data dict
+            data = {
+                "position": {
+                    "latitude": location_resp.latitude,
+                    "longitude": location_resp.longitude,
+                },
             }
+            
+            # Calculate WGS84 coordinates
+            wgs84_coords = gcj02towgs84(location_resp.longitude, location_resp.latitude)
+            data["position_wgs84"] = {
+                "longitude": wgs84_coords[0],
+                "latitude": wgs84_coords[1],
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("location", data)
+            
+        except Exception as err:
+            _LOGGER.error(f"Failed to parse location for VIN {self.vin}: {err}")
+            self._data_source_status["location"] = False
+            if not self._restore_from_cache("location"):
+                _LOGGER.warning(f"No cache available for location data on VIN {self.vin}")
+            return
 
     async def _parse_engine_status(self):
         try:
-            engine_resp: GetEngineRemoteStartResp = await self._api.get_engine_status(self.vin)
-            engine_data = engine_resp.data
+            if not self.isAaos:
+                return
+            
+            engine_status_resp: GetEngineRemoteStartResp = await self._api.get_engine_remote_start_status(self.vin)
+            engine_status = engine_status_resp.data
+            _LOGGER.debug(engine_status)
+            
+            # Build data dict
+            data = {
+                "engine_remote_running": (engine_status.engineRunningStatus == EngineRunningStatus.STARTED),
+                "engine_remote_start_time": engine_status.engineStartTimestamp,
+                "engine_remote_end_time": engine_status.engineStopTimestamp,
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("engine_status", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse engine status for VIN {self.vin}: {err}")
+            self._data_source_status["engine_status"] = False
+            if not self._restore_from_cache("engine_status"):
+                _LOGGER.warning(f"No cache available for engine status data on VIN {self.vin}")
             return
-        if engine_data.engineRunningStatus in [EngineRunningStatus.Starting, EngineRunningStatus.Running]:
-            self.engine_remote_running = True
-            self.engine_running = True
-        else:
-            self.engine_remote_running = False
-        self.engine_remote_start_time = engine_data.engineStartTime.seconds
-        self.engine_remote_end_time = engine_data.engineEndTime.seconds
 
     async def _parse_car_preference(self):
         try:
             preference_resp: GetPreferencesResp = await self._api.get_car_preferences(self.vin)
-            _LOGGER.debug("preference:%s", preference_resp)
+            _LOGGER.debug(preference_resp)
+            
+            # Build data dict
+            data = {
+                "nickname": preference_resp.preference.nickName,
+            }
+            
+            # Set attributes
+            for key, value in data.items():
+                setattr(self, key, value)
+            
+            # Cache successful data
+            self._save_to_cache("preference", data)
+            
         except Exception as err:
-            _LOGGER.error(err)
+            _LOGGER.error(f"Failed to parse car preference for VIN {self.vin}: {err}")
+            self._data_source_status["preference"] = False
+            if not self._restore_from_cache("preference"):
+                _LOGGER.warning(f"No cache available for preference data on VIN {self.vin}")
             return
-        if preference_resp and preference_resp.preference:
-            self.nickname = preference_resp.preference.nickName
-
     async def update(self):
         if not self.series_name:
             vehicles = await self._api.get_vehicles()

@@ -169,6 +169,20 @@
             },
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname}百公里油耗"
+            },
+            "connection_status": {
+                "name": "{nickname}连接状态",
+                "state_attributes": {
+                    "last_update_time": {
+                        "name": "最后更新时间"
+                    },
+                    "consecutive_failures": {
+                        "name": "连续失败次数"
+                    },
+                    "cache_info": {
+                        "name": "缓存信息"
+                    }
+                }
             }
         },
         "device_tracker": {

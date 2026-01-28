@@ -169,6 +169,20 @@
             },
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname} Fuel average consumption liters per 100 km"
+            },
+            "connection_status": {
+                "name": "{nickname} Connection Status",
+                "state_attributes": {
+                    "last_update_time": {
+                        "name": "Last Update Time"
+                    },
+                    "consecutive_failures": {
+                        "name": "Consecutive Failures"
+                    },
+                    "cache_info": {
+                        "name": "Cache Info"
+                    }
+                }
             }
         },
         "device_tracker": {
