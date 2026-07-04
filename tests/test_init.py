@@ -9,7 +9,12 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn import (
+    CARD_RESOURCE_PATH,
+    CARD_RESOURCE_URL,
+    FRONTEND_URL_PATH,
+    _async_register_card_resource,
     async_migrate_entry,
+    async_setup,
     async_setup_entry,
     async_update_options,
     VolvoCoordinator,
@@ -31,6 +36,65 @@ from tests.conftest import TEST_USERNAME, TEST_PASSWORD, TEST_SCAN_INTERVAL
 
 class TestIntegrationSetup:
     """Test the integration setup process."""
+
+    @pytest.mark.asyncio
+    async def test_async_setup_registers_frontend_static_path(self):
+        """The bundled card is served before config entries are loaded."""
+        fake_hass = MagicMock()
+        fake_hass.data = {}
+        fake_hass.http.async_register_static_paths = AsyncMock()
+
+        assert await async_setup(fake_hass, {}) is True
+
+        fake_hass.http.async_register_static_paths.assert_awaited_once()
+        static_path = fake_hass.http.async_register_static_paths.await_args.args[0][0]
+        assert static_path.url_path == FRONTEND_URL_PATH
+        assert static_path.cache_headers is True
+
+    @pytest.mark.asyncio
+    async def test_card_resource_is_created_in_storage_mode(self):
+        """The card module is added once to storage-backed resources."""
+        from homeassistant.components.lovelace import LOVELACE_DATA
+        from homeassistant.components.lovelace.const import MODE_STORAGE
+
+        resources = MagicMock()
+        resources.async_get_info = AsyncMock(return_value={"resources": 0})
+        resources.async_items.return_value = []
+        resources.async_create_item = AsyncMock()
+        lovelace = MagicMock(resource_mode=MODE_STORAGE, resources=resources)
+        fake_hass = MagicMock()
+        fake_hass.data = {LOVELACE_DATA: lovelace}
+
+        await _async_register_card_resource(fake_hass)
+
+        resources.async_create_item.assert_awaited_once_with(
+            {"res_type": "module", "url": CARD_RESOURCE_URL}
+        )
+
+    @pytest.mark.asyncio
+    async def test_card_resource_version_is_updated(self):
+        """An older bundled resource URL is updated instead of duplicated."""
+        from homeassistant.components.lovelace import LOVELACE_DATA
+        from homeassistant.components.lovelace.const import MODE_STORAGE
+
+        resources = MagicMock()
+        resources.async_get_info = AsyncMock(return_value={"resources": 1})
+        resources.async_items.return_value = [
+            {"id": "resource-id", "url": f"{CARD_RESOURCE_PATH}?v=0.9.0"}
+        ]
+        resources.async_update_item = AsyncMock()
+        resources.async_create_item = AsyncMock()
+        lovelace = MagicMock(resource_mode=MODE_STORAGE, resources=resources)
+        fake_hass = MagicMock()
+        fake_hass.data = {LOVELACE_DATA: lovelace}
+
+        await _async_register_card_resource(fake_hass)
+
+        resources.async_update_item.assert_awaited_once_with(
+            "resource-id",
+            {"res_type": "module", "url": CARD_RESOURCE_URL},
+        )
+        resources.async_create_item.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_async_setup_entry(self, hass: HomeAssistant, mock_volvo_api):
@@ -399,7 +463,7 @@ class TestErrorScenarios:
             with patch.object(VolvoCoordinator, "async_config_entry_first_refresh", 
                             side_effect=ConfigEntryAuthFailed("Auth failed")):
                 # Mock async_step_reauth to avoid the UnknownStep error
-                with patch.object(config_entry, "async_start_reauth", new_callable=AsyncMock) as mock_reauth:
+                with patch.object(config_entry, "async_start_reauth") as mock_reauth:
                     # Setup should fail but not crash
                     await hass.config_entries.async_setup(config_entry.entry_id)
                     
@@ -409,6 +473,7 @@ class TestErrorScenarios:
                     # Instead verify the entry is not loaded
                     from homeassistant.config_entries import ConfigEntryState
                     assert config_entry.state != ConfigEntryState.LOADED
+                    mock_reauth.assert_called_once()
 
 
 # =============================================================================

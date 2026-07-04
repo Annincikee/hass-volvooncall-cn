@@ -214,6 +214,15 @@
             "electric_range": {
                 "name": "{nickname}纯电续航里程"
             },
+            "full_charge_electric_range": {
+                "name": "{nickname}最近满电续航",
+                "state_attributes": {
+                    "sampled_at": { "name": "采样时间" },
+                    "sample_count": { "name": "满电采样次数" },
+                    "data_source": { "name": "数据源" },
+                    "trigger_battery_level": { "name": "触发电量" }
+                }
+            },
             "battery_charging_status": {
                 "name": "{nickname}充电状态",
                 "state": {

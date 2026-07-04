@@ -684,7 +684,9 @@ class Vehicle(object):
                     "battery_charge_level_percentage": _to_float(
                         status.get("batteryChargeLevelPercentage")
                     ),
-                    "electric_range": _to_int(status.get("estimatedDrivingKm")),
+                    "electric_range": _to_float(
+                        status.get("estimatedDrivingKm")
+                    ),
                     "tm_energy_consumption": None,
                     "battery_charging_status": (
                         "charging"

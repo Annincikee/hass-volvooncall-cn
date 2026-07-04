@@ -1,24 +1,23 @@
-from datetime import timedelta
-import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import logging
+from pathlib import Path
 
-from homeassistant.core import HomeAssistant
+from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.lovelace import LOVELACE_DATA
+from homeassistant.components.lovelace.const import MODE_STORAGE
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers import entity_registry as er
-
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
     UpdateFailed,
 )
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 
 from .store import VolvoStore
 from .volvooncall_base import DEFAULT_SCAN_INTERVAL
@@ -43,6 +42,55 @@ PLATFORMS = {
 }
 
 _LOGGER = logging.getLogger(__name__)
+
+FRONTEND_PATH = Path(__file__).parent / "frontend"
+FRONTEND_URL_PATH = f"/{DOMAIN}/frontend"
+CARD_RESOURCE_PATH = f"{FRONTEND_URL_PATH}/volvo-car-card.js"
+CARD_RESOURCE_URL = f"{CARD_RESOURCE_PATH}?v=1.0.0"
+
+
+async def _async_register_card_resource(hass: HomeAssistant) -> None:
+    """Register the bundled card when Lovelace resources use storage mode."""
+    lovelace = hass.data.get(LOVELACE_DATA)
+    if lovelace is None:
+        _LOGGER.warning(
+            "Lovelace is not loaded; add %s as a module resource manually",
+            CARD_RESOURCE_URL,
+        )
+        return
+
+    if lovelace.resource_mode != MODE_STORAGE:
+        _LOGGER.info(
+            "Lovelace resources use YAML mode; add %s as a module resource",
+            CARD_RESOURCE_URL,
+        )
+        return
+
+    resources = lovelace.resources
+    await resources.async_get_info()
+    for item in resources.async_items() or []:
+        url = item.get("url", "")
+        if url.split("?", 1)[0] != CARD_RESOURCE_PATH:
+            continue
+        if url != CARD_RESOURCE_URL:
+            await resources.async_update_item(
+                item["id"],
+                {"res_type": "module", "url": CARD_RESOURCE_URL},
+            )
+        return
+
+    await resources.async_create_item(
+        {"res_type": "module", "url": CARD_RESOURCE_URL}
+    )
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Serve and register the bundled Volvo vehicle card."""
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(FRONTEND_URL_PATH, str(FRONTEND_PATH), True)]
+    )
+    await _async_register_card_resource(hass)
+    return True
 
 
 def remove_electric_entity_registry_entries(hass, config_entry_id):
@@ -191,6 +239,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 
                 vinVehicleMaps = await self.volvo_api.get_vehicles_vins()
                 vehicles = []
+                store_datas = []
                 
                 for vin, vehicleInfos in vinVehicleMaps.items():
                     modelYear = int(vehicleInfos.get("modelYear", 2020))
@@ -218,10 +267,18 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
                     store_data = VolvoStore(self.hass, vin)
                     await store_data.load_create_data()
-                    self.store_datas.append(store_data)
+                    if self.supports_electric:
+                        await store_data.async_capture_full_charge_range(
+                            vehicle.battery_charge_level_percentage,
+                            vehicle.electric_range,
+                            datetime.now(timezone.utc).isoformat(),
+                            vehicle.charge_data_source,
+                        )
+                    store_datas.append(store_data)
 
                 # Track successful update
                 self._consecutive_failures = 0
+                self.store_datas = store_datas
                 return vehicles
                 
         except Exception as err:
@@ -447,6 +504,14 @@ metaMap = {
         "icon": "mdi:map-marker-distance",
         "unit": "km",
         "entity_id": "electric_range",
+        "state_class": "measurement",
+    },
+    "full_charge_electric_range": {
+        "name": "Full charge electric range",
+        "device_class": "distance",
+        "icon": "mdi:battery-check",
+        "unit": "km",
+        "entity_id": "full_charge_electric_range",
         "state_class": "measurement",
     },
     "battery_charging_status": {

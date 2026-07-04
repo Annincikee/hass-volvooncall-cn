@@ -1,5 +1,5 @@
-![Version](https://img.shields.io/github/v/release/idreamshen/hass-volvooncall-cn?color=green&label=Version)
-[![GitHub all releases](https://img.shields.io/github/downloads/idreamshen/hass-volvooncall-cn/total?label=Downloads)](https://github.com/idreamshen/hass-volvooncall-cn/releases)
+![Version](https://img.shields.io/github/v/release/Annincikee/hass-volvooncall-cn?color=green&label=Version)
+[![GitHub all releases](https://img.shields.io/github/downloads/Annincikee/hass-volvooncall-cn/total?label=Downloads)](https://github.com/Annincikee/hass-volvooncall-cn/releases)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
 
@@ -13,6 +13,7 @@ Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车
 - 远程控制（锁定/解锁、引擎启动/停止、鸣笛、闪灯）
 - 燃油和续航信息
 - 纯电续航、电量和充电桩状态
+- T8 满电续航采样与长期电池衰减趋势
 - 车辆位置跟踪
 - 车辆警告信息（保养、液位、胎压）
 - 支持多车辆
@@ -34,7 +35,7 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 - `T8`：插电混动车型，启用全部电池、纯电续航、充电及 TM 电耗实体。
 
 已有配置会默认保留为 `T8` 以避免升级后实体突然消失，可在集成“配置”中修改并自动重载。
-- 存储库：https://github.com/idreamshen/hass-volvooncall-cn
+- 存储库：https://github.com/Annincikee/hass-volvooncall-cn
 - 类别：集成
 
 浏览并下载存储库 -> 搜索 Volvo On Call CN 并下载
@@ -52,6 +53,80 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 - 密码：即"沃尔沃APP"上的登录密码，需要提前设置好登录密码
 
 提交稍等片刻后，即可看到拥有的车辆设备
+
+## 内置车辆控制卡片（S90 T8 优先）
+
+集成内置 `custom:volvo-car-card`，按最新 Sections 仪表盘的 12 列网格适配，集中显示车锁、四门、四窗、引擎盖、后备箱、天窗、燃油、电量、纯电续航、充电和常用远程控制。
+
+Lovelace 使用“存储模式”时，集成会自动注册卡片资源。重启 Home Assistant 并强制刷新浏览器后，可直接在卡片选择器的“社区”区域添加“Volvo 车辆控制卡”。也可以手动添加：
+
+```yaml
+type: custom:volvo-car-card
+vin: TESTVIN0000000001
+name: S90 Polestar
+model: s90_t8
+show_controls: true
+show_details: true
+```
+
+`vin` 不区分大小写。卡片会按 `{domain}.{vin}_{suffix}` 自动关联本集成的实体。若实体曾在 Home Assistant 中改名，可在 YAML 中覆盖单个实体：
+
+```yaml
+type: custom:volvo-car-card
+vin: TESTVIN0000000001
+model: s90_t8
+entities:
+  battery: sensor.s90_t8_battery
+  electric_range: sensor.s90_t8_electric_range
+  lock: lock.s90_t8_lock
+```
+
+如果 Lovelace 资源使用 YAML 模式，请手动添加模块资源：
+
+```yaml
+lovelace:
+  resource_mode: yaml
+  resources:
+    - url: /volvooncall_cn/frontend/volvo-car-card.js?v=1.0.0
+      type: module
+```
+
+### 本地 APK 车辆素材
+
+卡片支持使用你本人合法取得的 Volvo Cars APK 中的俯视车辆素材进行本地学习。仓库不会提交或发布该专有图片。将 APK 放在仓库根目录后执行：
+
+```bash
+[removed legacy local-asset helper] base..apk
+```
+
+脚本会在本地生成：
+
+```text
+custom_components/volvooncall_cn/frontend/cartopview_complete_fallback.png
+```
+
+手动部署时，需要把该图片与 `volvo-car-card.js` 一起复制到 Home Assistant 的 `custom_components/volvooncall_cn/frontend/`。也可在卡片配置中用 `image:` 指向你自己的 `/local/...` 或 HTTP(S) 车辆俯视图，以适配其他车型。
+
+## T8 满电续航趋势
+
+T8 配置会创建 `sensor.{vin}_full_charge_electric_range`。集成在车辆电量第一次达到 `100%` 时记录当次服务端续航值；同一次满电停留期间不会重复采样，电量降到 `100%` 以下后才会等待下一次满电。最近样本、采样时间、累计次数和数据源会写入 Home Assistant 存储，重启或重载集成后仍保留。
+
+该传感器使用距离设备类型和 `measurement` 状态类，可直接进入 Home Assistant Recorder 长期统计。例如：
+
+```yaml
+type: statistics-graph
+title: T8 满电续航趋势
+entities:
+  - sensor.testvin0000000001_full_charge_electric_range
+days_to_show: 365
+period: month
+stat_types:
+  - mean
+```
+
+精度说明：主 gRPC 接口的 `estimatedDistanceToEmptyKm` 字段类型是 `int32`，因此只提供整公里；家充桩回退接口的 `estimatedDrivingKm` 若返回小数，本集成会原样保留为浮点值，不主动取整或四舍五入。
+
+满电表显续航会受环境温度、空调负载、近期驾驶能耗和车辆估算策略影响，适合观察长期趋势，但不等同于电池管理系统的真实 SOH/可用容量。建议比较相近季节和使用条件下的多次样本，不要用单次变化直接判断电池衰减。
 
 ## 实体一览
 
@@ -96,6 +171,7 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `sensor.{vin}_ta_average_speed` | TA 平均速度 | 单位 km/h |
 | `sensor.{vin}_battery_charge_level` | 动力电池电量 | 单位 % |
 | `sensor.{vin}_electric_range` | 纯电续航里程 | 单位 km |
+| `sensor.{vin}_full_charge_electric_range` | 最近满电续航 | 100% 电量时每个充电周期采样一次，单位 km，支持长期统计 |
 | `sensor.{vin}_charging_status` | 充电状态 | 属性包含数据源和家充桩信息 |
 | `sensor.{vin}_charger_connection_status` | 充电枪连接状态 | 属性包含数据源和家充桩信息 |
 | `sensor.{vin}_estimated_charging_time` | 预计充满剩余时间 | 单位 min |

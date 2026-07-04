@@ -3,12 +3,20 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from google.protobuf.descriptor import FieldDescriptor
 
 from custom_components.volvooncall_cn.proto.battery_pb2 import (
     Battery,
     GetBatteryResponse,
 )
 from custom_components.volvooncall_cn.volvooncall_cn import Vehicle
+
+
+def test_grpc_electric_range_is_integer_by_schema():
+    """The official gRPC field exposes whole kilometres as int32."""
+    field = Battery.DESCRIPTOR.fields_by_name["estimatedDistanceToEmptyKm"]
+
+    assert field.type == FieldDescriptor.TYPE_INT32
 
 
 @pytest.mark.asyncio
@@ -57,7 +65,7 @@ async def test_parse_battery_falls_back_to_charge_pile():
             },
             "status": {
                 "batteryChargeLevelPercentage": "63.0",
-                "estimatedDrivingKm": "48",
+                "estimatedDrivingKm": "48.75",
                 "connectorStatus": 3,
                 "startChargeSeqStat": 1,
                 "estimatedChargingTime": "55",
@@ -70,7 +78,7 @@ async def test_parse_battery_falls_back_to_charge_pile():
     await vehicle._parse_battery()
 
     assert vehicle.battery_charge_level_percentage == 63.0
-    assert vehicle.electric_range == 48
+    assert vehicle.electric_range == 48.75
     assert vehicle.battery_charging_status == "charging"
     assert vehicle.charger_connection_status == "charging"
     assert vehicle.estimated_charging_time == 55

@@ -214,6 +214,15 @@
             "electric_range": {
                 "name": "{nickname} Electric range"
             },
+            "full_charge_electric_range": {
+                "name": "{nickname} Full charge electric range",
+                "state_attributes": {
+                    "sampled_at": { "name": "Sampled at" },
+                    "sample_count": { "name": "Sample count" },
+                    "data_source": { "name": "Data source" },
+                    "trigger_battery_level": { "name": "Trigger battery level" }
+                }
+            },
             "battery_charging_status": {
                 "name": "{nickname} Charging status",
                 "state": {

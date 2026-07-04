@@ -15,6 +15,7 @@ ELECTRIC_SENSOR_KEYS = (
     "tm_energy_consumption",
     "battery_charge_level_percentage",
     "electric_range",
+    "full_charge_electric_range",
     "battery_charging_status",
     "charger_connection_status",
     "estimated_charging_time",

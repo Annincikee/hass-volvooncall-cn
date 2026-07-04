@@ -7,6 +7,22 @@ on:
     branches: [main, master, dev]
 
 jobs:
+  frontend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test bundled vehicle card
+        env:
+          NODE_NO_WARNINGS: "1"
+        run: node --test tests/frontend/volvo-car-card.test.mjs
+
   test:
     runs-on: ubuntu-latest
     strategy:

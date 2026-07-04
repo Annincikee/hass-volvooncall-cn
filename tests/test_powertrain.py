@@ -51,6 +51,12 @@ def test_switching_to_fuel_removes_existing_electric_registry_entries(hass):
         "TEST_VIN-electric_range",
         config_entry=config_entry,
     )
+    full_charge = registry.async_get_or_create(
+        "sensor",
+        "volvooncall_cn",
+        "TEST_VIN-full_charge_electric_range",
+        config_entry=config_entry,
+    )
     fuel = registry.async_get_or_create(
         "sensor",
         "volvooncall_cn",
@@ -61,6 +67,7 @@ def test_switching_to_fuel_removes_existing_electric_registry_entries(hass):
     remove_electric_entity_registry_entries(hass, config_entry.entry_id)
 
     assert registry.async_get(electric.entity_id) is None
+    assert registry.async_get(full_charge.entity_id) is None
     assert registry.async_get(fuel.entity_id) is not None
 
 

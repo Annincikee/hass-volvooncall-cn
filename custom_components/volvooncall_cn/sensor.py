@@ -50,8 +50,15 @@ async def async_setup_entry(
         for sensor_key in sensor_keys_for_powertrain(
             coordinator.supports_electric
         ):
-            entities.append(VolvoSensor(coordinator, idx, sensor_key))
-        entities.append(VolvoConnectionStatusSensor(coordinator, idx, "connection_status"))
+            if sensor_key == "full_charge_electric_range":
+                entities.append(
+                    VolvoFullChargeRangeSensor(coordinator, idx, sensor_key)
+                )
+            else:
+                entities.append(VolvoSensor(coordinator, idx, sensor_key))
+        entities.append(
+            VolvoConnectionStatusSensor(coordinator, idx, "connection_status")
+        )
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
 
     async_add_entities(entities)
@@ -114,5 +121,32 @@ class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
             "last_update_time": vehicle.last_update_time.isoformat() if vehicle.last_update_time else None,
             "consecutive_failures": vehicle._consecutive_failures,
             "cache_info": vehicle.get_cache_info(),
+        }
+        self.async_write_ha_state()
+
+
+class VolvoFullChargeRangeSensor(VolvoEntity, SensorEntity):
+    """Persist the range captured at the start of each 100% charge session."""
+
+    def __init__(self, coordinator, idx, metaMapKey):
+        """Initialize the full-charge range sensor."""
+        super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Publish the most recent persisted full-charge sample."""
+        store_data = self.coordinator.store_datas[self.idx]
+        self._attr_native_value = store_data.get(
+            "full_charge_electric_range"
+        )
+        self._attr_native_unit_of_measurement = metaMap[self.metaMapKey][
+            "unit"
+        ]
+        self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
+        self._attr_extra_state_attributes = {
+            "sampled_at": store_data.get("full_charge_sampled_at"),
+            "sample_count": store_data.get("full_charge_sample_count") or 0,
+            "data_source": store_data.get("full_charge_data_source"),
+            "trigger_battery_level": 100,
         }
         self.async_write_ha_state()
