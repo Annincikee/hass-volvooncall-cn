@@ -109,6 +109,9 @@
                     }
                 }
             },
+            "climatization_switch": {
+                "name": "{nickname}温度调节"
+            },
             "tail_gate_switch": {
                 "name": "{nickname}尾箱控制"
             },

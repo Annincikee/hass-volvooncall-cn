@@ -54,8 +54,9 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 |-----------------------------------------------|------------------|-----------------------------------------------------------|
 | `lock.{vin}_lock` | 车锁 | 远程锁定或解锁车辆 |
 | `binary_sensor.{vin}_engine` | 引擎 | |
-| `switch.{vin}_engine_remote_control` | 远程启动 | 远程启动 & 空调 |
+| `switch.{vin}_engine_remote_control` | 远程启动 | 直接启动车辆，使用下方选择的 1–15 分钟时长 |
 | `number.{vin}_engine_duration` | 远程启动持续时长 | 单位分钟，默认 5 分钟 |
+| `switch.{vin}_climatization` | 温度调节 | 仅开启/关闭驻车空调，不启动车辆，不使用远程启动时长 |
 | `sensor.{vin}_distance_to_empty` | 续航里程 | |
 | `binary_sensor.{vin}_front_left_door` | 前左门 | 表示门是否打开 |
 | `binary_sensor.{vin}_front_right_door` | 前右门 | |

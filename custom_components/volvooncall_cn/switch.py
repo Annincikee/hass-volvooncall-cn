@@ -24,6 +24,9 @@ async def async_setup_entry(
     switchs = []
     for idx, ent in enumerate(coordinator.data):
         switchs.append(VolvoEngineSwitch(coordinator, idx, "engine_switch"))
+        switchs.append(
+            VolvoClimatizationSwitch(coordinator, idx, "climatization_switch")
+        )
         if ent.get("isAaos"):
             switchs.append(VolvoTailgateSwitch(coordinator, idx, "tail_gate_switch"))
             switchs.append(VolvoSunroofSwitch(coordinator, idx, "sunroof_switch"))
@@ -75,6 +78,26 @@ class VolvoEngineSwitch(VolvoSwitchEntity):
             "remote_start_at": data.get(start_time),
             "remote_end_at": data.get(end_time)
         }
+
+
+class VolvoClimatizationSwitch(VolvoEntity, SwitchEntity):
+    """Optimistic parked-climatization control without a duration setting."""
+
+    _attr_assumed_state = True
+
+    def __init__(self, coordinator, idx, metaKey):
+        super().__init__(coordinator, idx, metaKey, Platform.SWITCH)
+        self._attr_is_on = False
+
+    async def async_turn_on(self) -> None:
+        await self.coordinator.data[self.idx].climatization_start()
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self) -> None:
+        await self.coordinator.data[self.idx].climatization_stop()
+        self._attr_is_on = False
+        self.async_write_ha_state()
 
 
 class VolvoTailgateSwitch(VolvoSwitchEntity):

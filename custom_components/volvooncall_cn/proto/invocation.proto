@@ -5,6 +5,8 @@ package invocation;
 service InvocationService {
   rpc WindowControl(windowControlReq) returns(stream invocationCommResp) {}
   rpc EngineStart(EngineStartReq) returns(stream invocationCommResp) {}
+  rpc ClimatizationStart(ClimatizationStartReq) returns(stream invocationCommResp) {}
+  rpc ClimatizationStop(ClimatizationStopReq) returns(stream invocationCommResp) {}
   rpc HonkFlash(HonkFlashReq) returns(stream invocationCommResp) {}
   rpc Lock(LockReq) returns (stream invocationCommResp) {}
   rpc Unlock(UnlockReq) returns (stream invocationCommResp) {}
@@ -59,6 +61,17 @@ message EngineStartReq {
   invocationHead head = 1;
   bool isStart = 2;
   int32 startDurationMin = 3;
+}
+
+// 驻车空调（仅开空调，不启动发动机，也不设置运行时长）
+message ClimatizationStartReq {
+  invocationHead head = 1;
+  bool start = 2;
+  float compartmentTemperatureCelsius = 3;
+}
+
+message ClimatizationStopReq {
+  invocationHead head = 1;
 }
 
 enum HonkFlashType {

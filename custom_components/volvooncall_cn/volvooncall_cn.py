@@ -17,6 +17,7 @@ from .proto.invocation_pb2_grpc import InvocationServiceStub
 from .proto.invocation_pb2 import invocationHead, invocationStatus, invocationControlType, invocationCommResp
 from .proto.invocation_pb2 import windowControlReq
 from .proto.invocation_pb2 import EngineStartReq
+from .proto.invocation_pb2 import ClimatizationStartReq, ClimatizationStopReq
 from .proto.invocation_pb2 import HonkFlashReq, HonkFlashType
 from .proto.invocation_pb2 import LockReq, LockType
 from .proto.invocation_pb2 import UnlockReq, UnlockType
@@ -221,6 +222,32 @@ class VehicleAPI(VehicleBaseAPI):
             self.raise_invocation_fail(res.data.status)
             break
         return
+
+    async def climatization_control(self, vin: str, is_start: bool):
+        """Start or stop parked climatization without starting the engine."""
+        stub = InvocationServiceStub(self.channel)
+        req_header = invocationHead(vin=vin)
+        metadata: list = [("vin", vin)]
+
+        if is_start:
+            req = ClimatizationStartReq(
+                head=req_header,
+                start=True,
+                compartmentTemperatureCelsius=0,
+            )
+            responses = stub.ClimatizationStart(
+                req, metadata=metadata, timeout=TIMEOUT.seconds
+            )
+        else:
+            req = ClimatizationStopReq(head=req_header)
+            responses = stub.ClimatizationStop(
+                req, metadata=metadata, timeout=TIMEOUT.seconds
+            )
+
+        for res in responses:
+            _LOGGER.debug(res)
+            self.raise_invocation_fail(res.data.status)
+            break
 
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
         stub = InvocationServiceStub(self.channel)
@@ -866,6 +893,12 @@ class Vehicle(object):
 
     async def engine_stop(self):
         await self._api.engine_control(self.vin, False, 0)
+
+    async def climatization_start(self):
+        await self._api.climatization_control(self.vin, True)
+
+    async def climatization_stop(self):
+        await self._api.climatization_control(self.vin, False)
 
     def get(self, key):
         if not hasattr(self, key):
