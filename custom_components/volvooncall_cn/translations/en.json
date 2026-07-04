@@ -6,7 +6,21 @@
                 "data": {
                     "username": "Username",
                     "password": "Password",
-                    "scan_interval": "Scan Interval(s)"
+                    "scan_interval": "Scan Interval(s)",
+                    "powertrain_type": "Powertrain (B4/B5/B6 or T8)"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "user": {
+                "description": "Update account, polling, and vehicle powertrain settings",
+                "data": {
+                    "username": "Username",
+                    "password": "Password",
+                    "scan_interval": "Scan Interval(s)",
+                    "powertrain_type": "Powertrain (B4/B5/B6 or T8)"
                 }
             }
         }

@@ -9,12 +9,18 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn import (
+    async_migrate_entry,
     async_setup_entry,
     async_update_options,
     VolvoCoordinator,
 )
 from custom_components.volvooncall_cn.volvooncall_cn import DOMAIN
 from custom_components.volvooncall_cn.volvooncall_base import DEFAULT_SCAN_INTERVAL
+from custom_components.volvooncall_cn.const import (
+    CONF_POWERTRAIN_TYPE,
+    DEFAULT_POWERTRAIN_TYPE,
+    POWERTRAIN_FUEL,
+)
 
 from tests.conftest import TEST_USERNAME, TEST_PASSWORD, TEST_SCAN_INTERVAL
 
@@ -92,6 +98,29 @@ class TestIntegrationSetup:
                 # Verify update listener was added
                 assert len(config_entry.update_listeners) > 0
 
+    @pytest.mark.asyncio
+    async def test_migrate_entry_defaults_existing_users_to_t8(
+        self, hass: HomeAssistant
+    ):
+        """Existing entries retain electric entities after upgrading."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: TEST_PASSWORD,
+            },
+            unique_id=TEST_USERNAME,
+            version=1,
+        )
+        config_entry.add_to_hass(hass)
+
+        assert await async_migrate_entry(hass, config_entry) is True
+        assert config_entry.version == 2
+        assert (
+            config_entry.data[CONF_POWERTRAIN_TYPE]
+            == DEFAULT_POWERTRAIN_TYPE
+        )
+
 
 # =============================================================================
 # Test Update Options
@@ -161,6 +190,43 @@ class TestUpdateOptions:
             assert mock_api_class.called
             # Verify coordinator's API was updated
             assert coordinator.volvo_api is not None
+
+    @pytest.mark.asyncio
+    async def test_powertrain_option_change_reloads_entry(
+        self, hass: HomeAssistant, mock_volvo_api
+    ):
+        """Changing the selected model group reloads platform entities."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: TEST_PASSWORD,
+                CONF_POWERTRAIN_TYPE: DEFAULT_POWERTRAIN_TYPE,
+            },
+            unique_id=TEST_USERNAME,
+        )
+        config_entry.add_to_hass(hass)
+        hass.data.setdefault(DOMAIN, {})
+        coordinator = VolvoCoordinator(
+            hass,
+            mock_volvo_api,
+            TEST_SCAN_INTERVAL,
+            DEFAULT_POWERTRAIN_TYPE,
+        )
+        hass.data[DOMAIN][config_entry.entry_id] = coordinator
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options={CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL},
+        )
+
+        with patch.object(
+            hass.config_entries,
+            "async_reload",
+            new_callable=AsyncMock,
+        ) as reload_entry:
+            await async_update_options(hass, config_entry)
+
+        reload_entry.assert_awaited_once_with(config_entry.entry_id)
 
 
 # =============================================================================

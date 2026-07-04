@@ -9,6 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers import entity_registry as er
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -24,6 +25,12 @@ from .volvooncall_base import DEFAULT_SCAN_INTERVAL
 from .volvooncall_cn import VehicleAPI
 from .volvooncall_cn import Vehicle
 from .volvooncall_cn import DOMAIN
+from .const import (
+    CONF_POWERTRAIN_TYPE,
+    DEFAULT_POWERTRAIN_TYPE,
+    ELECTRIC_SENSOR_KEYS,
+    POWERTRAIN_T8,
+)
 
 PLATFORMS = {
     "sensor": "sensor",
@@ -38,6 +45,17 @@ PLATFORMS = {
 _LOGGER = logging.getLogger(__name__)
 
 
+def remove_electric_entity_registry_entries(hass, config_entry_id):
+    """Remove stale electric entities when switching an entry to fuel."""
+    registry = er.async_get(hass)
+    electric_suffixes = tuple(f"-{key}" for key in ELECTRIC_SENSOR_KEYS)
+    for registry_entry in er.async_entries_for_config_entry(
+        registry, config_entry_id
+    ):
+        if registry_entry.unique_id.endswith(electric_suffixes):
+            registry.async_remove(registry_entry.entity_id)
+
+
 async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
     # entry = {**config_entry.data, **config_entry.options}
     config_data = {**config_entry.data, **config_entry.options}
@@ -46,12 +64,20 @@ async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
     username = config_data.get(CONF_USERNAME)
     password = config_data.get(CONF_PASSWORD)
     interval = config_data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    powertrain_type = config_data.get(
+        CONF_POWERTRAIN_TYPE, DEFAULT_POWERTRAIN_TYPE
+    )
     _LOGGER.info("new interval: %s", interval)
     session = async_get_clientsession(hass)
     volvo_api = VehicleAPI(session=session, username=username, password=password)
     hass.data.setdefault(DOMAIN, {})
     if config_entry.entry_id in hass.data[DOMAIN]:
         coordinator = hass.data[DOMAIN][entry_id]
+        if coordinator.powertrain_type != powertrain_type:
+            if powertrain_type != POWERTRAIN_T8:
+                remove_electric_entity_registry_entries(hass, entry_id)
+            await hass.config_entries.async_reload(entry_id)
+            return
         coordinator.volvo_api = volvo_api
         coordinator.update_interval = timedelta(seconds=interval)
 
@@ -60,12 +86,18 @@ async def async_setup_entry(hass, entry):
     """Config entry example."""
     session = async_get_clientsession(hass)
 
-    username = entry.data.get(CONF_USERNAME)
-    password = entry.data.get(CONF_PASSWORD)
-    interval = entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    config_data = {**entry.data, **entry.options}
+    username = config_data.get(CONF_USERNAME)
+    password = config_data.get(CONF_PASSWORD)
+    interval = config_data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    powertrain_type = config_data.get(
+        CONF_POWERTRAIN_TYPE, DEFAULT_POWERTRAIN_TYPE
+    )
     volvo_api = VehicleAPI(session=session, username=username, password=password)
     hass.data.setdefault(DOMAIN, {})
-    coordinator = hass.data[DOMAIN][entry.entry_id] = VolvoCoordinator(hass, volvo_api, interval)
+    coordinator = hass.data[DOMAIN][entry.entry_id] = VolvoCoordinator(
+        hass, volvo_api, interval, powertrain_type
+    )
 
     # Fetch initial data so we have data when entities subscribe
     #
@@ -83,10 +115,33 @@ async def async_setup_entry(hass, entry):
     return True
 
 
+async def async_migrate_entry(hass, entry):
+    """Add a powertrain selection to entries created before version 2."""
+    if entry.version == 1:
+        data = dict(entry.data)
+        data.setdefault(CONF_POWERTRAIN_TYPE, DEFAULT_POWERTRAIN_TYPE)
+        hass.config_entries.async_update_entry(entry, data=data, version=2)
+    return True
+
+
+async def async_unload_entry(hass, entry):
+    """Unload an integration entry so powertrain changes can reload entities."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+    return unload_ok
+
+
 class VolvoCoordinator(DataUpdateCoordinator):
     """My custom coordinator."""
 
-    def __init__(self, hass, volvo_api, scan_interval):
+    def __init__(
+        self,
+        hass,
+        volvo_api,
+        scan_interval,
+        powertrain_type=DEFAULT_POWERTRAIN_TYPE,
+    ):
         """Initialize my coordinator."""
         super().__init__(
             hass,
@@ -97,6 +152,8 @@ class VolvoCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=scan_interval),
         )
         self.volvo_api = volvo_api
+        self.powertrain_type = powertrain_type
+        self.supports_electric = powertrain_type == POWERTRAIN_T8
         self.store_datas = []
         # Connection health tracking
         self._consecutive_failures = 0
@@ -138,7 +195,12 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 for vin, vehicleInfos in vinVehicleMaps.items():
                     modelYear = int(vehicleInfos.get("modelYear", 2020))
                     isAaos = modelYear >= 2022
-                    vehicle = Vehicle(vin, self.volvo_api, isAaos)
+                    vehicle = Vehicle(
+                        vin,
+                        self.volvo_api,
+                        isAaos,
+                        supports_electric=self.supports_electric,
+                    )
                     
                     # Try to update, but don't fail completely
                     try:

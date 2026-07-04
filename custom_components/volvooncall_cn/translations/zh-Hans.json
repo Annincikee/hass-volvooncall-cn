@@ -6,7 +6,21 @@
                 "data": {
                     "username": "手机号(11位数字)",
                     "password": "密码",
-                    "scan_interval": "扫描间隔(单位秒)"
+                    "scan_interval": "扫描间隔(单位秒)",
+                    "powertrain_type": "动力类型（B4/B5/B6 或 T8）"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "user": {
+                "description": "修改账号、扫描间隔和车辆动力类型",
+                "data": {
+                    "username": "手机号(11位数字)",
+                    "password": "密码",
+                    "scan_interval": "扫描间隔(单位秒)",
+                    "powertrain_type": "动力类型（B4/B5/B6 或 T8）"
                 }
             }
         }

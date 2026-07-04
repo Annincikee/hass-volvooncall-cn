@@ -367,10 +367,11 @@ class VehicleAPI(VehicleBaseAPI):
 
 
 class Vehicle(object):
-    def __init__(self, vin, api, isAaos):
+    def __init__(self, vin, api, isAaos, supports_electric=True):
         self.vin = vin
         self._api = api
         self.isAaos = isAaos
+        self.supports_electric = supports_electric
 
         self.series_name = ""
         self.model_name = ""
@@ -452,8 +453,9 @@ class Vehicle(object):
             "availability": True,
             "engine_status": True,
             "preference": True,
-            "battery": True,
         }
+        if self.supports_electric:
+            self._data_source_status["battery"] = True
 
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
@@ -875,8 +877,9 @@ class Vehicle(object):
             funcs = [self._parse_exterior, self._parse_odometer,
                      self._parse_fuel, self._parse_availability,
                      self._parse_location, self._parse_engine_status,
-                     self._parse_health, self._parse_car_preference,
-                     self._parse_battery]
+                     self._parse_health, self._parse_car_preference]
+            if self.supports_electric:
+                funcs.append(self._parse_battery)
             for runf in funcs:
                 task = tg.create_task(runf())
                 tasks.append(task)

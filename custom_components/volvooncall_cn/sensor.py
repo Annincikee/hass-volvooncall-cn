@@ -11,8 +11,30 @@ from homeassistant.const import Platform
 
 from . import VolvoCoordinator, VolvoEntity, metaMap
 from .volvooncall_cn import DOMAIN
+from .const import ELECTRIC_SENSOR_KEYS
 
 _LOGGER = logging.getLogger(__name__)
+
+BASE_SENSOR_KEYS = (
+    "distance_to_empty",
+    "odo_meter",
+    "fuel_amount",
+    "fuel_average_consumption_liters_per_100_km",
+    "tm_distance",
+    "tm_fuel_consumption",
+    "tm_average_speed",
+    "ta_distance",
+    "ta_fuel_consumption",
+    "ta_average_speed",
+    "service_warning_msg",
+)
+
+
+def sensor_keys_for_powertrain(supports_electric):
+    """Return sensor keys appropriate for the selected vehicle type."""
+    if supports_electric:
+        return BASE_SENSOR_KEYS + ELECTRIC_SENSOR_KEYS
+    return BASE_SENSOR_KEYS
 
 
 async def async_setup_entry(
@@ -25,24 +47,10 @@ async def async_setup_entry(
 
     entities = []
     for idx, _ in enumerate(coordinator.data):
-        entities.append(VolvoSensor(coordinator, idx, "distance_to_empty"))
-        entities.append(VolvoSensor(coordinator, idx, "odo_meter"))
-        entities.append(VolvoSensor(coordinator, idx, "fuel_amount"))
-        entities.append(VolvoSensor(coordinator, idx, "fuel_average_consumption_liters_per_100_km"))
-        entities.append(VolvoSensor(coordinator, idx, "tm_distance"))
-        entities.append(VolvoSensor(coordinator, idx, "tm_fuel_consumption"))
-        entities.append(VolvoSensor(coordinator, idx, "tm_energy_consumption"))
-        entities.append(VolvoSensor(coordinator, idx, "tm_average_speed"))
-        entities.append(VolvoSensor(coordinator, idx, "ta_distance"))
-        entities.append(VolvoSensor(coordinator, idx, "ta_fuel_consumption"))
-        entities.append(VolvoSensor(coordinator, idx, "ta_average_speed"))
-        entities.append(VolvoSensor(coordinator, idx, "battery_charge_level_percentage"))
-        entities.append(VolvoSensor(coordinator, idx, "electric_range"))
-        entities.append(VolvoSensor(coordinator, idx, "battery_charging_status"))
-        entities.append(VolvoSensor(coordinator, idx, "charger_connection_status"))
-        entities.append(VolvoSensor(coordinator, idx, "estimated_charging_time"))
-        entities.append(VolvoSensor(coordinator, idx, "charging_power"))
-        entities.append(VolvoSensor(coordinator, idx, "service_warning_msg"))
+        for sensor_key in sensor_keys_for_powertrain(
+            coordinator.supports_electric
+        ):
+            entities.append(VolvoSensor(coordinator, idx, sensor_key))
         entities.append(VolvoConnectionStatusSensor(coordinator, idx, "connection_status"))
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
 

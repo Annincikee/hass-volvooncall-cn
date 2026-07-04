@@ -13,6 +13,11 @@ from custom_components.volvooncall_cn.config_flow import (
 )
 from custom_components.volvooncall_cn.volvooncall_base import VolvoAPIError, DEFAULT_SCAN_INTERVAL
 from custom_components.volvooncall_cn.volvooncall_cn import DOMAIN
+from custom_components.volvooncall_cn.const import (
+    CONF_POWERTRAIN_TYPE,
+    DEFAULT_POWERTRAIN_TYPE,
+    POWERTRAIN_FUEL,
+)
 
 from tests.conftest import TEST_USERNAME, TEST_PASSWORD, TEST_SCAN_INTERVAL
 
@@ -90,6 +95,7 @@ class TestConfigFlow:
                     CONF_USERNAME: TEST_USERNAME,
                     CONF_PASSWORD: TEST_PASSWORD,
                     CONF_SCAN_INTERVAL: TEST_SCAN_INTERVAL,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL,
                 }
             )
             
@@ -98,6 +104,7 @@ class TestConfigFlow:
             assert result["data"][CONF_USERNAME] == TEST_USERNAME
             assert result["data"][CONF_PASSWORD] == TEST_PASSWORD
             assert result["data"][CONF_SCAN_INTERVAL] == TEST_SCAN_INTERVAL
+            assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_FUEL
 
     @pytest.mark.asyncio
     async def test_user_flow_invalid_credentials(self, hass: HomeAssistant):
@@ -145,6 +152,10 @@ class TestConfigFlow:
             assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
             # Default scan interval should be used
             assert result["data"][CONF_SCAN_INTERVAL] == DEFAULT_SCAN_INTERVAL
+            assert (
+                result["data"][CONF_POWERTRAIN_TYPE]
+                == DEFAULT_POWERTRAIN_TYPE
+            )
 
     @pytest.mark.asyncio
     async def test_user_flow_unique_id(self, hass: HomeAssistant):
@@ -243,6 +254,44 @@ class TestOptionsFlow:
             
             assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
             assert result["data"][CONF_SCAN_INTERVAL] == new_scan_interval
+            assert (
+                result["data"][CONF_POWERTRAIN_TYPE]
+                == DEFAULT_POWERTRAIN_TYPE
+            )
+
+    @pytest.mark.asyncio
+    async def test_options_flow_updates_powertrain(self, hass: HomeAssistant):
+        """Test selecting the fuel/ mild-hybrid model group in options."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: TEST_PASSWORD,
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            unique_id=TEST_USERNAME,
+        )
+        config_entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            return_value={},
+        ):
+            result = await hass.config_entries.options.async_init(
+                config_entry.entry_id
+            )
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_USERNAME: TEST_USERNAME,
+                    CONF_PASSWORD: TEST_PASSWORD,
+                    CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL,
+                },
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+        assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_FUEL
 
     @pytest.mark.asyncio
     async def test_options_flow_validation_error(self, hass: HomeAssistant):
