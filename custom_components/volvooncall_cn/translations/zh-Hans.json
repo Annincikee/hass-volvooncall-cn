@@ -170,6 +170,57 @@
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname}百公里油耗"
             },
+            "battery_charge_level_percentage": {
+                "name": "{nickname}动力电池电量"
+            },
+            "electric_range": {
+                "name": "{nickname}纯电续航里程"
+            },
+            "battery_charging_status": {
+                "name": "{nickname}充电状态",
+                "state": {
+                    "unknown": "未知",
+                    "charging": "充电中",
+                    "idle": "空闲",
+                    "completed": "充电完成",
+                    "fault": "故障",
+                    "scheduled": "已预约",
+                    "smart_charging": "智能充电",
+                    "discharging": "放电中",
+                    "not_started": "未开始",
+                    "aborted": "异常结束"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "数据源" },
+                    "charge_pile_name": { "name": "充电桩名称" },
+                    "charge_pile_address": { "name": "充电桩地址" }
+                }
+            },
+            "charger_connection_status": {
+                "name": "{nickname}充电枪连接状态",
+                "state": {
+                    "unknown": "未知",
+                    "disconnected": "未连接",
+                    "connected_ac": "AC充电",
+                    "connected_dc": "DC快充",
+                    "offline": "离线",
+                    "idle": "空闲",
+                    "plugged_in": "已插枪",
+                    "charging": "充电中",
+                    "fault": "故障"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "数据源" },
+                    "charge_pile_name": { "name": "充电桩名称" },
+                    "charge_pile_address": { "name": "充电桩地址" }
+                }
+            },
+            "estimated_charging_time": {
+                "name": "{nickname}预计充满剩余时间"
+            },
+            "charging_power": {
+                "name": "{nickname}充电功率"
+            },
             "connection_status": {
                 "name": "{nickname}连接状态",
                 "state_attributes": {

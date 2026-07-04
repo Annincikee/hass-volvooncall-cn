@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package services.vehiclestates.battery;
+
+service BatteryService {
+  rpc GetLatestBattery(GetBatteryRequest) returns (stream GetBatteryResponse) {}
+}
+
+message GetBatteryRequest {
+  string id = 1;
+  string vin = 2;
+}
+
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+message Battery {
+  Timestamp updateTime = 1;
+  double batteryChargeLevelPercentage = 2;
+  double averageEnergyConsumptionKwhPer100Km = 3;
+  int32 estimatedDistanceToEmptyKm = 4;
+  int32 estimatedChargingTimeToFullMinutes = 5;
+  int32 chargerConnectionStatus = 6;
+  int32 chargingStatus = 7;
+  int32 estimatedDistanceToEmptyMiles = 8;
+  int32 chargingPowerWatts = 10;
+}
+
+message GetBatteryResponse {
+  string id = 1;
+  string vin = 2;
+  Battery battery = 3;
+}

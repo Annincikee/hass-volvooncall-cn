@@ -29,6 +29,12 @@ async def async_setup_entry(
         entities.append(VolvoSensor(coordinator, idx, "odo_meter"))
         entities.append(VolvoSensor(coordinator, idx, "fuel_amount"))
         entities.append(VolvoSensor(coordinator, idx, "fuel_average_consumption_liters_per_100_km"))
+        entities.append(VolvoSensor(coordinator, idx, "battery_charge_level_percentage"))
+        entities.append(VolvoSensor(coordinator, idx, "electric_range"))
+        entities.append(VolvoSensor(coordinator, idx, "battery_charging_status"))
+        entities.append(VolvoSensor(coordinator, idx, "charger_connection_status"))
+        entities.append(VolvoSensor(coordinator, idx, "estimated_charging_time"))
+        entities.append(VolvoSensor(coordinator, idx, "charging_power"))
         entities.append(VolvoSensor(coordinator, idx, "service_warning_msg"))
         entities.append(VolvoConnectionStatusSensor(coordinator, idx, "connection_status"))
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
@@ -61,6 +67,16 @@ class VolvoSensor(VolvoEntity, SensorEntity):
         # Set entity_category if defined in metaMap
         if "entity_category" in metaMap[self.metaMapKey]:
             self._attr_entity_category = metaMap[self.metaMapKey]["entity_category"]
+        if self.metaMapKey in {
+            "battery_charging_status",
+            "charger_connection_status",
+        }:
+            vehicle = self.coordinator.data[self.idx]
+            self._attr_extra_state_attributes = {
+                "data_source": vehicle.charge_data_source,
+                "charge_pile_name": vehicle.charge_pile_name,
+                "charge_pile_address": vehicle.charge_pile_address,
+            }
         self.async_write_ha_state()
 
 

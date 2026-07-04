@@ -12,6 +12,7 @@ Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车
 - 车辆状态监控（锁、引擎、车门、车窗等）
 - 远程控制（锁定/解锁、引擎启动/停止、鸣笛、闪灯）
 - 燃油和续航信息
+- 纯电续航、电量和充电桩状态
 - 车辆位置跟踪
 - 车辆警告信息（保养、液位、胎压）
 - 支持多车辆
@@ -78,6 +79,12 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `switch.{vin}_sunroof_control` | 远程控制天窗 | 仅在遮阳帘已打开时支持远程打开天窗（新款车型支持） |
 | `switch.{vin}_tailgate_control` | 远程控制尾箱 | 打开尾箱会同时解锁车辆,请注意及时锁车（新款车型支持） |
 | `sensor.{vin}_fuel_average_consumption_liters_per_100_km` | 百公里油耗 | |
+| `sensor.{vin}_battery_charge_level` | 动力电池电量 | 单位 % |
+| `sensor.{vin}_electric_range` | 纯电续航里程 | 单位 km |
+| `sensor.{vin}_charging_status` | 充电状态 | 属性包含数据源和家充桩信息 |
+| `sensor.{vin}_charger_connection_status` | 充电枪连接状态 | 属性包含数据源和家充桩信息 |
+| `sensor.{vin}_estimated_charging_time` | 预计充满剩余时间 | 单位 min |
+| `sensor.{vin}_charging_power` | 充电功率 | 单位 kW |
 | `binary_sensor.{vin}_service_warning` | 保养警告 | |
 | `sensor.{vin}_service_warning_msg` | 保养警告信息 | 无需保养、未知警告、定期保养即将到期、发动机工作时间即将需要保养、行驶里程即将需要保养、定期保养时间已到、发动机工作时间保养时间已到、行驶里程保养时间已到、定期保养已逾期、发动机工作时间保养已逾期、行驶里程保养已逾期 |
 | `binary_sensor.{vin}_brake_fluid_level_warning` | 刹车液警告 | |

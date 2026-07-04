@@ -52,6 +52,8 @@ class VehicleBaseAPI:
         self._digitalvolvo_x_token = ""
         self._vocapi_access_token = ""
         self._access_token_expire_at = 0
+        self._charge_piles_cache = None
+        self._charge_piles_cache_expire_at = 0
 
     async def _request_digitalvolvo(self, method, url, headers, **kwargs):
         for i in range(MAX_RETRIES):
@@ -172,6 +174,59 @@ class VehicleBaseAPI:
             vins[vinCode] = k
 
         return vins
+
+    async def get_charge_piles(self):
+        """Return the home charging piles linked to the current account."""
+        now = time.time()
+        if (
+            self._charge_piles_cache is not None
+            and now < self._charge_piles_cache_expire_at
+        ):
+            return self._charge_piles_cache
+
+        phone = urllib.parse.quote(self._username, safe="")
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            f"/app/charge-pile/api/v1/api/brandPile/getPileList?phone={phone}",
+        )
+        result = await self.digitalvolvo_get(url, {})
+        piles = result.get("data", {}).get("brandPileList", []) if result else []
+
+        self._charge_piles_cache = piles
+        self._charge_piles_cache_expire_at = now + 5 * 60
+        return piles
+
+    async def get_charge_pile_status(self, vin):
+        """Return battery and charging telemetry from the linked home pile."""
+        piles = await self.get_charge_piles()
+        if not piles:
+            return None
+
+        pile = piles[0]
+        connector_id = pile.get("connectorId", "")
+        equipment_id = pile.get("equipmentId", "")
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            "/app/charge-pile/api/v1/api/brandHomePile/status",
+        )
+        result = await self.digitalvolvo_post(
+            url,
+            {},
+            {
+                "vinCode": vin,
+                "connectorId": connector_id,
+                "connectorID": connector_id,
+                "equipmentId": equipment_id,
+                "tradeNo": "",
+            },
+        )
+        if not result or not result.get("data"):
+            return None
+
+        return {
+            "pile": pile,
+            "status": result["data"],
+        }
 
 
 def json_loads(s):

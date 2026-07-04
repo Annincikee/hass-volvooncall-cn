@@ -170,6 +170,57 @@
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname} Fuel average consumption liters per 100 km"
             },
+            "battery_charge_level_percentage": {
+                "name": "{nickname} Battery charge level"
+            },
+            "electric_range": {
+                "name": "{nickname} Electric range"
+            },
+            "battery_charging_status": {
+                "name": "{nickname} Charging status",
+                "state": {
+                    "unknown": "Unknown",
+                    "charging": "Charging",
+                    "idle": "Idle",
+                    "completed": "Completed",
+                    "fault": "Fault",
+                    "scheduled": "Scheduled",
+                    "smart_charging": "Smart charging",
+                    "discharging": "Discharging",
+                    "not_started": "Not started",
+                    "aborted": "Aborted"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "Data source" },
+                    "charge_pile_name": { "name": "Charge pile name" },
+                    "charge_pile_address": { "name": "Charge pile address" }
+                }
+            },
+            "charger_connection_status": {
+                "name": "{nickname} Charger connection status",
+                "state": {
+                    "unknown": "Unknown",
+                    "disconnected": "Disconnected",
+                    "connected_ac": "AC connected",
+                    "connected_dc": "DC connected",
+                    "offline": "Offline",
+                    "idle": "Idle",
+                    "plugged_in": "Plugged in",
+                    "charging": "Charging",
+                    "fault": "Fault"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "Data source" },
+                    "charge_pile_name": { "name": "Charge pile name" },
+                    "charge_pile_address": { "name": "Charge pile address" }
+                }
+            },
+            "estimated_charging_time": {
+                "name": "{nickname} Estimated charging time"
+            },
+            "charging_power": {
+                "name": "{nickname} Charging power"
+            },
             "connection_status": {
                 "name": "{nickname} Connection Status",
                 "state_attributes": {
