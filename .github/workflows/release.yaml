@@ -4,11 +4,14 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write
+
 jobs:
   release-zip:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: ZIP Component Dir
         run: |
@@ -16,10 +19,9 @@ jobs:
           zip -r volvooncall_cn.zip ./
 
       - name: Upload zip to release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ github.workspace }}/custom_components/volvooncall_cn/volvooncall_cn.zip
-          asset_name: volvooncall_cn.zip
-          tag: ${{ github.ref }}
-          overwrite: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release upload "${{ github.event.release.tag_name }}"
+          "${{ github.workspace }}/custom_components/volvooncall_cn/volvooncall_cn.zip"
+          --clobber
