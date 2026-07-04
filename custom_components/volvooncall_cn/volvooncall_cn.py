@@ -396,6 +396,13 @@ class Vehicle(object):
         self.rear_right_window_open_ajar = False
         self.fuel_amount = 0
         self.fuel_average_consumption_liters_per_100_km = 0
+        self.tm_distance = None
+        self.tm_fuel_consumption = None
+        self.tm_energy_consumption = None
+        self.tm_average_speed = None
+        self.ta_distance = None
+        self.ta_fuel_consumption = None
+        self.ta_average_speed = None
         self.battery_charge_level_percentage = None
         self.electric_range = None
         self.battery_charging_status = None
@@ -597,6 +604,8 @@ class Vehicle(object):
                 "fuel_amount": round(fuel_data.fuelAmount, 2),
                 "distance_to_empty": fuel_data.distanceToEmptyKm,
                 "fuel_average_consumption_liters_per_100_km": fuel_data.TMFuelAvgConsum,
+                "tm_fuel_consumption": fuel_data.TMFuelAvgConsum,
+                "ta_fuel_consumption": fuel_data.ATFuleAvgConsum,
             }
             
             # Set attributes
@@ -627,6 +636,9 @@ class Vehicle(object):
                     battery.batteryChargeLevelPercentage, 1
                 ),
                 "electric_range": battery.estimatedDistanceToEmptyKm,
+                "tm_energy_consumption": (
+                    battery.averageEnergyConsumptionKwhPer100Km
+                ),
                 "battery_charging_status": (
                     "charging"
                     if battery.chargingPowerWatts > 0
@@ -671,6 +683,7 @@ class Vehicle(object):
                         status.get("batteryChargeLevelPercentage")
                     ),
                     "electric_range": _to_int(status.get("estimatedDrivingKm")),
+                    "tm_energy_consumption": None,
                     "battery_charging_status": (
                         "charging"
                         if is_charging
@@ -712,6 +725,12 @@ class Vehicle(object):
             # Build data dict
             data = {
                 "odo_meter": odometer_data.odometerMeters / 1000,
+                "tm_distance": odometer_data.tripMeterManualKm,
+                "tm_average_speed": odometer_data.averageSpeedKmPerHour,
+                "ta_distance": odometer_data.tripMeterAutomaticKm,
+                "ta_average_speed": (
+                    odometer_data.averageSpeedKmPerHourAutomatic
+                ),
             }
             
             # Set attributes

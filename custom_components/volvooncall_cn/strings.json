@@ -173,6 +173,27 @@
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname} Fuel average consumption liters per 100 km"
             },
+            "tm_distance": {
+                "name": "{nickname} TM distance"
+            },
+            "tm_fuel_consumption": {
+                "name": "{nickname} TM average fuel consumption"
+            },
+            "tm_energy_consumption": {
+                "name": "{nickname} TM average energy consumption"
+            },
+            "tm_average_speed": {
+                "name": "{nickname} TM average speed"
+            },
+            "ta_distance": {
+                "name": "{nickname} TA distance"
+            },
+            "ta_fuel_consumption": {
+                "name": "{nickname} TA average fuel consumption"
+            },
+            "ta_average_speed": {
+                "name": "{nickname} TA average speed"
+            },
             "battery_charge_level_percentage": {
                 "name": "{nickname} Battery charge level"
             },

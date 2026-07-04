@@ -173,6 +173,27 @@
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname}百公里油耗"
             },
+            "tm_distance": {
+                "name": "{nickname} TM里程"
+            },
+            "tm_fuel_consumption": {
+                "name": "{nickname} TM平均油耗"
+            },
+            "tm_energy_consumption": {
+                "name": "{nickname} TM平均电耗"
+            },
+            "tm_average_speed": {
+                "name": "{nickname} TM平均速度"
+            },
+            "ta_distance": {
+                "name": "{nickname} TA里程"
+            },
+            "ta_fuel_consumption": {
+                "name": "{nickname} TA平均油耗"
+            },
+            "ta_average_speed": {
+                "name": "{nickname} TA平均速度"
+            },
             "battery_charge_level_percentage": {
                 "name": "{nickname}动力电池电量"
             },

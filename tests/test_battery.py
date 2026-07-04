@@ -20,6 +20,7 @@ async def test_parse_battery_from_grpc():
             vin="TEST_VIN",
             battery=Battery(
                 batteryChargeLevelPercentage=76.5,
+                averageEnergyConsumptionKwhPer100Km=18.4,
                 estimatedDistanceToEmptyKm=54,
                 estimatedChargingTimeToFullMinutes=42,
                 chargerConnectionStatus=2,
@@ -34,6 +35,7 @@ async def test_parse_battery_from_grpc():
 
     assert vehicle.battery_charge_level_percentage == 76.5
     assert vehicle.electric_range == 54
+    assert vehicle.tm_energy_consumption == 18.4
     assert vehicle.battery_charging_status == "charging"
     assert vehicle.charger_connection_status == "connected_ac"
     assert vehicle.estimated_charging_time == 42

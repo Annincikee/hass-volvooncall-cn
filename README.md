@@ -80,6 +80,13 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `switch.{vin}_sunroof_control` | 远程控制天窗 | 仅在遮阳帘已打开时支持远程打开天窗（新款车型支持） |
 | `switch.{vin}_tailgate_control` | 远程控制尾箱 | 打开尾箱会同时解锁车辆,请注意及时锁车（新款车型支持） |
 | `sensor.{vin}_fuel_average_consumption_liters_per_100_km` | 百公里油耗 | |
+| `sensor.{vin}_tm_distance` | TM 里程 | 手动复位行程，单位 km |
+| `sensor.{vin}_tm_fuel_consumption` | TM 平均油耗 | 单位 L/100km |
+| `sensor.{vin}_tm_energy_consumption` | TM 平均电耗 | 单位 kWh/100km |
+| `sensor.{vin}_tm_average_speed` | TM 平均速度 | 单位 km/h |
+| `sensor.{vin}_ta_distance` | TA 里程 | 自动复位行程，单位 km |
+| `sensor.{vin}_ta_fuel_consumption` | TA 平均油耗 | 单位 L/100km |
+| `sensor.{vin}_ta_average_speed` | TA 平均速度 | 单位 km/h |
 | `sensor.{vin}_battery_charge_level` | 动力电池电量 | 单位 % |
 | `sensor.{vin}_electric_range` | 纯电续航里程 | 单位 km |
 | `sensor.{vin}_charging_status` | 充电状态 | 属性包含数据源和家充桩信息 |
