@@ -11,8 +11,30 @@ from homeassistant.const import Platform
 
 from . import VolvoCoordinator, VolvoEntity, metaMap
 from .volvooncall_cn import DOMAIN
+from .const import ELECTRIC_SENSOR_KEYS
 
 _LOGGER = logging.getLogger(__name__)
+
+BASE_SENSOR_KEYS = (
+    "distance_to_empty",
+    "odo_meter",
+    "fuel_amount",
+    "fuel_average_consumption_liters_per_100_km",
+    "tm_distance",
+    "tm_fuel_consumption",
+    "tm_average_speed",
+    "ta_distance",
+    "ta_fuel_consumption",
+    "ta_average_speed",
+    "service_warning_msg",
+)
+
+
+def sensor_keys_for_powertrain(supports_electric):
+    """Return only sensors supported by the selected powertrain."""
+    if supports_electric:
+        return BASE_SENSOR_KEYS + ELECTRIC_SENSOR_KEYS
+    return BASE_SENSOR_KEYS
 
 
 async def async_setup_entry(
@@ -25,11 +47,15 @@ async def async_setup_entry(
 
     entities = []
     for idx, _ in enumerate(coordinator.data):
-        entities.append(VolvoSensor(coordinator, idx, "distance_to_empty"))
-        entities.append(VolvoSensor(coordinator, idx, "odo_meter"))
-        entities.append(VolvoSensor(coordinator, idx, "fuel_amount"))
-        entities.append(VolvoSensor(coordinator, idx, "fuel_average_consumption_liters_per_100_km"))
-        entities.append(VolvoSensor(coordinator, idx, "service_warning_msg"))
+        for sensor_key in sensor_keys_for_powertrain(
+            coordinator.supports_electric
+        ):
+            if sensor_key == "full_charge_electric_range":
+                entities.append(
+                    VolvoFullChargeRangeSensor(coordinator, idx, sensor_key)
+                )
+            else:
+                entities.append(VolvoSensor(coordinator, idx, sensor_key))
         entities.append(VolvoConnectionStatusSensor(coordinator, idx, "connection_status"))
         # entities.append(VolvoSensor(coordinator, idx, "fuel_amount_level"))
 
@@ -61,6 +87,16 @@ class VolvoSensor(VolvoEntity, SensorEntity):
         # Set entity_category if defined in metaMap
         if "entity_category" in metaMap[self.metaMapKey]:
             self._attr_entity_category = metaMap[self.metaMapKey]["entity_category"]
+        if self.metaMapKey in {
+            "battery_charging_status",
+            "charger_connection_status",
+        }:
+            vehicle = self.coordinator.data[self.idx]
+            self._attr_extra_state_attributes = {
+                "data_source": vehicle.charge_data_source,
+                "charge_pile_name": vehicle.charge_pile_name,
+                "charge_pile_address": vehicle.charge_pile_address,
+            }
         self.async_write_ha_state()
 
 
@@ -83,5 +119,32 @@ class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
             "last_update_time": vehicle.last_update_time.isoformat() if vehicle.last_update_time else None,
             "consecutive_failures": vehicle._consecutive_failures,
             "cache_info": vehicle.get_cache_info(),
+        }
+        self.async_write_ha_state()
+
+
+class VolvoFullChargeRangeSensor(VolvoEntity, SensorEntity):
+    """Publish the range captured at the start of each 100% charge session."""
+
+    def __init__(self, coordinator, idx, metaMapKey):
+        """Initialize the full-charge range sensor."""
+        super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Publish the most recent persisted full-charge range sample."""
+        store_data = self.coordinator.store_datas[self.idx]
+        self._attr_native_value = store_data.get(
+            "full_charge_electric_range"
+        )
+        self._attr_native_unit_of_measurement = metaMap[self.metaMapKey][
+            "unit"
+        ]
+        self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
+        self._attr_extra_state_attributes = {
+            "sampled_at": store_data.get("full_charge_sampled_at"),
+            "sample_count": store_data.get("full_charge_sample_count") or 0,
+            "data_source": store_data.get("full_charge_data_source"),
+            "trigger_battery_level": 100,
         }
         self.async_write_ha_state()

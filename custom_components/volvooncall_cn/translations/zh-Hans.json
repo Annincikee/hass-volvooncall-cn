@@ -6,7 +6,21 @@
                 "data": {
                     "username": "手机号(11位数字)",
                     "password": "密码",
-                    "scan_interval": "扫描间隔(单位秒)"
+                    "scan_interval": "扫描间隔(单位秒，最小30)",
+                    "powertrain_type": "动力类型（轻混/纯油 或 混动）"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "user": {
+                "description": "修改账号、扫描间隔和车辆动力类型",
+                "data": {
+                    "username": "手机号(11位数字)",
+                    "password": "密码",
+                    "scan_interval": "扫描间隔(单位秒，最小30)",
+                    "powertrain_type": "动力类型（轻混/纯油 或 混动）"
                 }
             }
         }
@@ -109,6 +123,9 @@
                     }
                 }
             },
+            "climatization_switch": {
+                "name": "{nickname}温度调节"
+            },
             "tail_gate_switch": {
                 "name": "{nickname}尾箱控制"
             },
@@ -169,6 +186,87 @@
             },
             "fuel_average_consumption_liters_per_100_km": {
                 "name": "{nickname}百公里油耗"
+            },
+            "tm_distance": {
+                "name": "{nickname} TM里程"
+            },
+            "tm_fuel_consumption": {
+                "name": "{nickname} TM平均油耗"
+            },
+            "tm_energy_consumption": {
+                "name": "{nickname} TM平均电耗"
+            },
+            "tm_average_speed": {
+                "name": "{nickname} TM平均速度"
+            },
+            "ta_distance": {
+                "name": "{nickname} TA里程"
+            },
+            "ta_fuel_consumption": {
+                "name": "{nickname} TA平均油耗"
+            },
+            "ta_average_speed": {
+                "name": "{nickname} TA平均速度"
+            },
+            "battery_charge_level_percentage": {
+                "name": "{nickname}动力电池电量"
+            },
+            "electric_range": {
+                "name": "{nickname}纯电续航里程"
+            },
+            "full_charge_electric_range": {
+                "name": "{nickname}最近满电续航",
+                "state_attributes": {
+                    "sampled_at": { "name": "采样时间" },
+                    "sample_count": { "name": "采样次数" },
+                    "data_source": { "name": "数据源" },
+                    "trigger_battery_level": { "name": "触发电量" }
+                }
+            },
+            "battery_charging_status": {
+                "name": "{nickname}充电状态",
+                "state": {
+                    "unknown": "未知",
+                    "charging": "充电中",
+                    "idle": "空闲",
+                    "completed": "充电完成",
+                    "fault": "故障",
+                    "scheduled": "已预约",
+                    "smart_charging": "智能充电",
+                    "discharging": "放电中",
+                    "not_started": "未开始",
+                    "aborted": "异常结束"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "数据源" },
+                    "charge_pile_name": { "name": "充电桩名称" },
+                    "charge_pile_address": { "name": "充电桩地址" }
+                }
+            },
+            "charger_connection_status": {
+                "name": "{nickname}充电枪连接状态",
+                "state": {
+                    "unknown": "未知",
+                    "disconnected": "未连接",
+                    "connected_ac": "AC充电",
+                    "connected_dc": "DC快充",
+                    "offline": "离线",
+                    "idle": "空闲",
+                    "plugged_in": "已插枪",
+                    "charging": "充电中",
+                    "fault": "故障"
+                },
+                "state_attributes": {
+                    "data_source": { "name": "数据源" },
+                    "charge_pile_name": { "name": "充电桩名称" },
+                    "charge_pile_address": { "name": "充电桩地址" }
+                }
+            },
+            "estimated_charging_time": {
+                "name": "{nickname}预计充满剩余时间"
+            },
+            "charging_power": {
+                "name": "{nickname}充电功率"
             },
             "connection_status": {
                 "name": "{nickname}连接状态",

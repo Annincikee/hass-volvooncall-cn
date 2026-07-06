@@ -13,6 +13,11 @@ from custom_components.volvooncall_cn.config_flow import (
 )
 from custom_components.volvooncall_cn.volvooncall_base import VolvoAPIError, DEFAULT_SCAN_INTERVAL
 from custom_components.volvooncall_cn.volvooncall_cn import DOMAIN
+from custom_components.volvooncall_cn.const import (
+    CONF_POWERTRAIN_TYPE,
+    POWERTRAIN_FUEL,
+    POWERTRAIN_HYBRID,
+)
 
 from tests.conftest import TEST_USERNAME, TEST_PASSWORD, TEST_SCAN_INTERVAL
 
@@ -98,6 +103,7 @@ class TestConfigFlow:
             assert result["data"][CONF_USERNAME] == TEST_USERNAME
             assert result["data"][CONF_PASSWORD] == TEST_PASSWORD
             assert result["data"][CONF_SCAN_INTERVAL] == TEST_SCAN_INTERVAL
+            assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_HYBRID
 
     @pytest.mark.asyncio
     async def test_user_flow_invalid_credentials(self, hass: HomeAssistant):
@@ -238,11 +244,13 @@ class TestOptionsFlow:
                     CONF_USERNAME: TEST_USERNAME,
                     CONF_PASSWORD: TEST_PASSWORD,
                     CONF_SCAN_INTERVAL: new_scan_interval,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL,
                 }
             )
             
             assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
             assert result["data"][CONF_SCAN_INTERVAL] == new_scan_interval
+            assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_FUEL
 
     @pytest.mark.asyncio
     async def test_options_flow_validation_error(self, hass: HomeAssistant):
@@ -308,7 +316,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_scan_interval_minimum_value(self, hass: HomeAssistant):
-        """Test that scan interval has minimum value of 5 seconds."""
+        """Test that scan interval has minimum value of 30 seconds."""
         with patch("custom_components.volvooncall_cn.config_flow.volvo_validation", return_value={}):
             result = await hass.config_entries.flow.async_init(
                 DOMAIN,
@@ -322,7 +330,7 @@ class TestEdgeCases:
                     user_input={
                         CONF_USERNAME: TEST_USERNAME,
                         CONF_PASSWORD: TEST_PASSWORD,
-                        CONF_SCAN_INTERVAL: 2,  # Below minimum of 5
+                        CONF_SCAN_INTERVAL: 29,  # Below minimum of 30
                     }
                 )
 
