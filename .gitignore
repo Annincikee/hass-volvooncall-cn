@@ -11,7 +11,7 @@ coverage.xml
 htmlcov/
 /.local/
 
-# Local APK analysis files (never publish proprietary app assets)
+# Local-only artifacts
 .DS_Store
 *.apk
 custom_components/volvooncall_cn/frontend/cartopview_complete_fallback.png

@@ -12,10 +12,8 @@ Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车
 - 车辆状态监控（锁、引擎、车门、车窗等）
 - 远程控制（锁定/解锁、引擎启动/停止、鸣笛、闪灯）
 - 燃油和续航信息
-- 纯电续航、电量和充电桩状态
-- T8 满电续航采样与 Home Assistant 原生长期统计
-- Volvo 原生风格 Home Assistant 统计卡片
-- 轻混/纯油与混动两类动力配置；轻混/纯油不创建或轮询电类实体
+- 混动车型支持动力电池电量、纯电续航、充电状态和 TM/TA 行程信息
+- 支持按动力类型过滤电类实体
 - 车辆位置跟踪
 - 车辆警告信息（保养、液位、胎压）
 - 支持多车辆
@@ -52,58 +50,6 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 动力类型分为“轻混/纯油”和“混动”。已有配置升级后默认保持为“混动”，避免电类实体无提示消失；可在集成“配置”中切换，保存后自动重载。
 
 扫描间隔最小值为 30 秒。集成的定时刷新和实体操作后触发的状态刷新共用同一个协调器节流门，扫描间隔未到时会复用 Home Assistant 中已有的上一份车辆数据，不会额外打完整车辆状态 API 链路。
-
-## Volvo 原生风格 Home Assistant 统计卡片
-
-集成内置 `custom:volvo-car-card`，参考本地 Volvo Cars App 研究包中的 DLS token、俯视车辆状态层和 TM/TA 行程统计结构重构。卡片集中展示车锁、四门、四窗、引擎盖、尾门、天窗、双能源续航、电量、油量、充电状态、TM/TA 行程统计和常用远程控制。
-
-Lovelace 使用“存储模式”时，集成会自动注册卡片资源。重启 Home Assistant 并强制刷新浏览器后，可直接在卡片选择器的“社区”区域添加“Volvo 原生风格统计卡”。也可以手动添加：
-
-```yaml
-type: custom:volvo-car-card
-vin: TESTVIN0000000001
-name: S90 T8
-model: s90_t8
-show_controls: true
-show_statistics: true
-```
-
-`vin` 不区分大小写。卡片会按 `{domain}.{vin}_{suffix}` 自动关联本集成实体。若实体曾在 Home Assistant 中改名，可覆盖单个实体：
-
-```yaml
-type: custom:volvo-car-card
-vin: TESTVIN0000000001
-entities:
-  battery: sensor.s90_t8_battery
-  electric_range: sensor.s90_t8_electric_range
-  tm_distance: sensor.s90_t8_tm_distance
-```
-
-如果 Lovelace 资源使用 YAML 模式，请手动添加模块资源：
-
-```yaml
-lovelace:
-  resource_mode: yaml
-  resources:
-    - url: /volvooncall_cn/frontend/volvo-car-card.js?v=2.0.2
-      type: module
-```
-
-### 本地 APK 车辆素材
-
-卡片支持使用你本人合法取得的 Volvo Cars APK 中的俯视车辆素材进行本地学习。仓库不会提交或发布该专有图片。将 APK 放在仓库根目录后执行：
-
-```bash
-[removed legacy local-asset helper] base..apk
-```
-
-脚本会在本地生成：
-
-```text
-custom_components/volvooncall_cn/frontend/cartopview_complete_fallback.png
-```
-
-手动部署时，需要把该图片与 `volvo-car-card.js` 一起复制到 Home Assistant 的 `custom_components/volvooncall_cn/frontend/`。也可在卡片配置中用 `image:` 指向你自己的 `/local/...` 或 HTTPS 车辆俯视图；出于混合内容和外部请求安全考虑，卡片会拒绝 `http://` 图片地址并回退到本地默认图。
 
 ## T8 满电续航长期统计
 
