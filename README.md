@@ -12,6 +12,10 @@ Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车
 - 车辆状态监控（锁、引擎、车门、车窗等）
 - 远程控制（锁定/解锁、引擎启动/停止、鸣笛、闪灯）
 - 燃油和续航信息
+- 纯电续航、电量和充电桩状态
+- T8 满电续航采样与 Home Assistant 原生长期统计
+- Volvo 原生风格 Home Assistant 统计卡片
+- 轻混/纯油与混动两类动力配置；轻混/纯油不创建或轮询电类实体
 - 车辆位置跟踪
 - 车辆警告信息（保养、液位、胎压）
 - 支持多车辆
@@ -45,6 +49,81 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 
 提交稍等片刻后，即可看到拥有的车辆设备
 
+动力类型分为“轻混/纯油”和“混动”。已有配置升级后默认保持为“混动”，避免电类实体无提示消失；可在集成“配置”中切换，保存后自动重载。
+
+扫描间隔最小值为 30 秒。集成的定时刷新和实体操作后触发的状态刷新共用同一个协调器节流门，扫描间隔未到时会复用 Home Assistant 中已有的上一份车辆数据，不会额外打完整车辆状态 API 链路。
+
+## Volvo 原生风格 Home Assistant 统计卡片
+
+集成内置 `custom:volvo-car-card`，参考本地 Volvo Cars App 研究包中的 DLS token、俯视车辆状态层和 TM/TA 行程统计结构重构。卡片集中展示车锁、四门、四窗、引擎盖、尾门、天窗、双能源续航、电量、油量、充电状态、TM/TA 行程统计和常用远程控制。
+
+Lovelace 使用“存储模式”时，集成会自动注册卡片资源。重启 Home Assistant 并强制刷新浏览器后，可直接在卡片选择器的“社区”区域添加“Volvo 原生风格统计卡”。也可以手动添加：
+
+```yaml
+type: custom:volvo-car-card
+vin: TESTVIN0000000001
+name: S90 T8
+model: s90_t8
+show_controls: true
+show_statistics: true
+```
+
+`vin` 不区分大小写。卡片会按 `{domain}.{vin}_{suffix}` 自动关联本集成实体。若实体曾在 Home Assistant 中改名，可覆盖单个实体：
+
+```yaml
+type: custom:volvo-car-card
+vin: TESTVIN0000000001
+entities:
+  battery: sensor.s90_t8_battery
+  electric_range: sensor.s90_t8_electric_range
+  tm_distance: sensor.s90_t8_tm_distance
+```
+
+如果 Lovelace 资源使用 YAML 模式，请手动添加模块资源：
+
+```yaml
+lovelace:
+  resource_mode: yaml
+  resources:
+    - url: /volvooncall_cn/frontend/volvo-car-card.js?v=2.0.2
+      type: module
+```
+
+### 本地 APK 车辆素材
+
+卡片支持使用你本人合法取得的 Volvo Cars APK 中的俯视车辆素材进行本地学习。仓库不会提交或发布该专有图片。将 APK 放在仓库根目录后执行：
+
+```bash
+scripts/extract_volvo_card_asset.sh base..apk
+```
+
+脚本会在本地生成：
+
+```text
+custom_components/volvooncall_cn/frontend/cartopview_complete_fallback.png
+```
+
+手动部署时，需要把该图片与 `volvo-car-card.js` 一起复制到 Home Assistant 的 `custom_components/volvooncall_cn/frontend/`。也可在卡片配置中用 `image:` 指向你自己的 `/local/...` 或 HTTPS 车辆俯视图；出于混合内容和外部请求安全考虑，卡片会拒绝 `http://` 图片地址并回退到本地默认图。
+
+## T8 满电续航长期统计
+
+混动车型会创建 `sensor.{vin}_full_charge_electric_range`。集成在车辆电量第一次达到 `100%` 时记录当次服务端纯电续航；同一次满电停留期间不会重复采样，电量降到 `100%` 以下后才会等待下一次满电。
+
+该传感器使用距离设备类型和 `measurement` 状态类，可直接进入 Home Assistant Recorder 长期统计。例如：
+
+```yaml
+type: statistics-graph
+title: T8 满电续航趋势
+entities:
+  - sensor.testvin0000000001_full_charge_electric_range
+days_to_show: 365
+period: month
+stat_types:
+  - mean
+```
+
+满电表显续航会受环境温度、空调负载、近期驾驶能耗和车辆估算策略影响，适合观察长期趋势，但不等同于电池管理系统的真实 SOH/可用容量。
+
 ## 实体一览
 
 `{vin}` 表示车架号
@@ -55,6 +134,7 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `binary_sensor.{vin}_engine` | 引擎 | |
 | `switch.{vin}_engine_remote_control` | 远程启动 | 远程启动 & 空调 |
 | `number.{vin}_engine_duration` | 远程启动持续时长 | 单位分钟，默认 5 分钟 |
+| `switch.{vin}_climatization` | 温度调节 | 仅开启/关闭驻车空调，不启动车辆，不设置运行时长 |
 | `sensor.{vin}_distance_to_empty` | 续航里程 | |
 | `binary_sensor.{vin}_front_left_door` | 前左门 | 表示门是否打开 |
 | `binary_sensor.{vin}_front_right_door` | 前右门 | |
@@ -78,6 +158,20 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `switch.{vin}_sunroof_control` | 远程控制天窗 | 仅在遮阳帘已打开时支持远程打开天窗（新款车型支持） |
 | `switch.{vin}_tailgate_control` | 远程控制尾箱 | 打开尾箱会同时解锁车辆,请注意及时锁车（新款车型支持） |
 | `sensor.{vin}_fuel_average_consumption_liters_per_100_km` | 百公里油耗 | |
+| `sensor.{vin}_tm_distance` | TM 里程 | 手动复位行程，单位 km |
+| `sensor.{vin}_tm_fuel_consumption` | TM 平均油耗 | 单位 L/100km |
+| `sensor.{vin}_tm_energy_consumption` | TM 平均电耗 | 单位 kWh/100km |
+| `sensor.{vin}_tm_average_speed` | TM 平均速度 | 单位 km/h |
+| `sensor.{vin}_ta_distance` | TA 里程 | 自动复位行程，单位 km |
+| `sensor.{vin}_ta_fuel_consumption` | TA 平均油耗 | 单位 L/100km |
+| `sensor.{vin}_ta_average_speed` | TA 平均速度 | 单位 km/h |
+| `sensor.{vin}_battery_charge_level` | 动力电池电量 | 单位 % |
+| `sensor.{vin}_electric_range` | 纯电续航里程 | 单位 km |
+| `sensor.{vin}_full_charge_electric_range` | 最近满电续航 | 100% 电量时每个充电周期采样一次，单位 km，支持长期统计 |
+| `sensor.{vin}_charging_status` | 充电状态 | 属性包含数据源和家充桩信息 |
+| `sensor.{vin}_charger_connection_status` | 充电枪连接状态 | 属性包含数据源和家充桩信息 |
+| `sensor.{vin}_estimated_charging_time` | 预计充满剩余时间 | 单位 min |
+| `sensor.{vin}_charging_power` | 充电功率 | 单位 kW |
 | `binary_sensor.{vin}_service_warning` | 保养警告 | |
 | `sensor.{vin}_service_warning_msg` | 保养警告信息 | 无需保养、未知警告、定期保养即将到期、发动机工作时间即将需要保养、行驶里程即将需要保养、定期保养时间已到、发动机工作时间保养时间已到、行驶里程保养时间已到、定期保养已逾期、发动机工作时间保养已逾期、行驶里程保养已逾期 |
 | `binary_sensor.{vin}_brake_fluid_level_warning` | 刹车液警告 | |
@@ -88,6 +182,8 @@ HACS -> 集成 -> 右上角三个点 -> 自定义存储库
 | `binary_sensor.{vin}_front_right_tyre_pressure_warning` | 右前胎压警告 | |
 | `binary_sensor.{vin}_rear_left_tyre_pressure_warning` | 左后胎压警告 | |
 | `binary_sensor.{vin}_rear_right_tyre_pressure_warning` | 右后胎压警告 | |
+
+动力电池电量、纯电续航和 TM 平均电耗只读取车辆 BatteryService。家充桩接口仅提供充电状态、连接状态、预计时间、功率、名称和地址，不会回填或覆盖车辆电量与纯电续航。
 
 ## 测试车型
 

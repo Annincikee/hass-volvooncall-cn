@@ -108,6 +108,22 @@ class EngineStartReq(_message.Message):
     startDurationMin: int
     def __init__(self, head: _Optional[_Union[invocationHead, _Mapping]] = ..., isStart: bool = ..., startDurationMin: _Optional[int] = ...) -> None: ...
 
+class ClimatizationStartReq(_message.Message):
+    __slots__ = ("head", "start", "compartmentTemperatureCelsius")
+    HEAD_FIELD_NUMBER: _ClassVar[int]
+    START_FIELD_NUMBER: _ClassVar[int]
+    COMPARTMENTTEMPERATURECELSIUS_FIELD_NUMBER: _ClassVar[int]
+    head: invocationHead
+    start: bool
+    compartmentTemperatureCelsius: float
+    def __init__(self, head: _Optional[_Union[invocationHead, _Mapping]] = ..., start: bool = ..., compartmentTemperatureCelsius: _Optional[float] = ...) -> None: ...
+
+class ClimatizationStopReq(_message.Message):
+    __slots__ = ("head",)
+    HEAD_FIELD_NUMBER: _ClassVar[int]
+    head: invocationHead
+    def __init__(self, head: _Optional[_Union[invocationHead, _Mapping]] = ...) -> None: ...
+
 class HonkFlashReq(_message.Message):
     __slots__ = ("head", "honkFlashType")
     HEAD_FIELD_NUMBER: _ClassVar[int]

@@ -6,9 +6,14 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import voluptuous as vol
 from .volvooncall_base import VolvoAPIError
-from .volvooncall_base import DEFAULT_SCAN_INTERVAL
+from .volvooncall_base import DEFAULT_SCAN_INTERVAL, MIN_SCAN_INTERVAL
 from .volvooncall_cn import VehicleAPI
 from .volvooncall_cn import DOMAIN
+from .const import (
+    CONF_POWERTRAIN_TYPE,
+    DEFAULT_POWERTRAIN_TYPE,
+    POWERTRAIN_OPTIONS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Example config flow."""
     # The schema version of the entries that it creates
     # Home Assistant will call your migrate method if the version changes
-    VERSION = 1
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -61,7 +66,10 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_schema = vol.Schema({
             vol.Required(CONF_USERNAME): str,
             vol.Required(CONF_PASSWORD): str,
-            vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=5)),
+            vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+            vol.Required(
+                CONF_POWERTRAIN_TYPE, default=DEFAULT_POWERTRAIN_TYPE
+            ): vol.In(POWERTRAIN_OPTIONS),
         })
         return self.async_show_form(step_id="user", data_schema=config_schema, errors=errors)
 
@@ -88,6 +96,9 @@ class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
         username = user_input.get(CONF_USERNAME, vol.UNDEFINED)
         password = user_input.get(CONF_PASSWORD, vol.UNDEFINED)
         scan_interval = user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        powertrain_type = user_input.get(
+            CONF_POWERTRAIN_TYPE, DEFAULT_POWERTRAIN_TYPE
+        )
         errors = {}
         if init_done:
             errors = await volvo_validation(self.hass, username, password)
@@ -97,6 +108,9 @@ class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
         config_schema = vol.Schema({
             vol.Required(CONF_USERNAME, default=username): str,
             vol.Required(CONF_PASSWORD, default=password): str,
-            vol.Optional(CONF_SCAN_INTERVAL, default=scan_interval): vol.All(vol.Coerce(int), vol.Range(min=5)),
+            vol.Optional(CONF_SCAN_INTERVAL, default=scan_interval): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+            vol.Required(
+                CONF_POWERTRAIN_TYPE, default=powertrain_type
+            ): vol.In(POWERTRAIN_OPTIONS),
         })
         return self.async_show_form(step_id="user", data_schema=config_schema, errors=errors)

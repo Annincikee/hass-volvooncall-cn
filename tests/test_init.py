@@ -1,7 +1,7 @@
 """Tests for __init__.py - Integration setup and coordinator."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -9,9 +9,14 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn import (
+    async_migrate_entry,
     async_setup_entry,
     async_update_options,
     VolvoCoordinator,
+)
+from custom_components.volvooncall_cn.const import (
+    CONF_POWERTRAIN_TYPE,
+    POWERTRAIN_HYBRID,
 )
 from custom_components.volvooncall_cn.volvooncall_cn import DOMAIN
 from custom_components.volvooncall_cn.volvooncall_base import DEFAULT_SCAN_INTERVAL
@@ -228,6 +233,21 @@ class TestVolvoCoordinator:
             await coordinator._async_update_data()
 
     @pytest.mark.asyncio
+    async def test_coordinator_throttles_manual_refresh_with_cached_data(self, hass: HomeAssistant, mock_volvo_api):
+        """Refreshes inside the global scan interval should reuse cached data."""
+        coordinator = VolvoCoordinator(hass, mock_volvo_api, TEST_SCAN_INTERVAL)
+        cached_data = [MagicMock()]
+        coordinator.data = cached_data
+        coordinator._last_update_started_at = datetime.now(timezone.utc)
+
+        result = await coordinator._async_update_data()
+
+        assert result is cached_data
+        mock_volvo_api.login.assert_not_called()
+        mock_volvo_api.update_token.assert_not_called()
+        mock_volvo_api.get_vehicles_vins.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_coordinator_update_interval_change(self, hass: HomeAssistant, mock_volvo_api):
         """Test changing coordinator update interval."""
         coordinator = VolvoCoordinator(hass, mock_volvo_api, TEST_SCAN_INTERVAL)
@@ -378,3 +398,23 @@ class TestDataStorage:
                 # Verify coordinator is stored
                 coordinator = hass.data[DOMAIN][config_entry.entry_id]
                 assert isinstance(coordinator, VolvoCoordinator)
+
+
+@pytest.mark.asyncio
+async def test_existing_entry_migrates_to_hybrid(hass: HomeAssistant):
+    """Upgrades preserve existing electric entities by default."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_USERNAME: TEST_USERNAME,
+            CONF_PASSWORD: TEST_PASSWORD,
+            CONF_SCAN_INTERVAL: TEST_SCAN_INTERVAL,
+        },
+        unique_id=TEST_USERNAME,
+        version=1,
+    )
+    config_entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, config_entry) is True
+    assert config_entry.version == 3
+    assert config_entry.data[CONF_POWERTRAIN_TYPE] == POWERTRAIN_HYBRID

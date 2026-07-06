@@ -17,6 +17,7 @@ from .proto.invocation_pb2_grpc import InvocationServiceStub
 from .proto.invocation_pb2 import invocationHead, invocationStatus, invocationControlType, invocationCommResp
 from .proto.invocation_pb2 import windowControlReq
 from .proto.invocation_pb2 import EngineStartReq
+from .proto.invocation_pb2 import ClimatizationStartReq, ClimatizationStopReq
 from .proto.invocation_pb2 import HonkFlashReq, HonkFlashType
 from .proto.invocation_pb2 import LockReq, LockType
 from .proto.invocation_pb2 import UnlockReq, UnlockType
@@ -34,6 +35,8 @@ from .proto.engineremotestart_pb2 import GetEngineRemoteStartReq, GetEngineRemot
 from .proto.car_preferences_pb2_grpc import CarPreferencesStub
 from .proto.car_preferences_pb2 import GetPreferencesReq, GetPreferencesResp
 from .proto.car_preferences_pb2 import UpdatePreferencesReq, UpdatePreferencesResp, Preference
+from .proto.battery_pb2_grpc import BatteryServiceStub
+from .proto.battery_pb2 import GetBatteryRequest, GetBatteryResponse
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +47,36 @@ USER_AGENT = "vca-android/5.53.1 grpc-java-okhttp/1.68.0"
 MAX_RETRIES = 1
 TIMEOUT = datetime.timedelta(seconds=10)
 DOMAIN = "volvooncall_cn"
+
+BATTERY_CHARGING_STATUS = {
+    0: "unknown",
+    1: "charging",
+    2: "idle",
+    3: "completed",
+    4: "fault",
+    5: "scheduled",
+    6: "smart_charging",
+    7: "discharging",
+}
+BATTERY_CONNECTION_STATUS = {
+    0: "unknown",
+    1: "disconnected",
+    2: "connected_ac",
+    3: "connected_dc",
+}
+PILE_CONNECTION_STATUS = {
+    0: "offline",
+    1: "idle",
+    2: "plugged_in",
+    3: "charging",
+    4: "fault",
+}
+PILE_CHARGING_STATUS = {
+    0: "not_started",
+    1: "charging",
+    2: "completed",
+    3: "aborted",
+}
 
 
 def isWindowOpen(status) -> bool:
@@ -190,6 +223,32 @@ class VehicleAPI(VehicleBaseAPI):
             break
         return
 
+    async def climatization_control(self, vin: str, is_start: bool):
+        """Start or stop parked climatization without starting the engine."""
+        stub = InvocationServiceStub(self.channel)
+        req_header = invocationHead(vin=vin)
+        metadata: list = [("vin", vin)]
+
+        if is_start:
+            req = ClimatizationStartReq(
+                head=req_header,
+                start=True,
+                compartmentTemperatureCelsius=0,
+            )
+            responses = stub.ClimatizationStart(
+                req, metadata=metadata, timeout=TIMEOUT.seconds
+            )
+        else:
+            req = ClimatizationStopReq(head=req_header)
+            responses = stub.ClimatizationStop(
+                req, metadata=metadata, timeout=TIMEOUT.seconds
+            )
+
+        for res in responses:
+            _LOGGER.debug(res)
+            self.raise_invocation_fail(res.data.status)
+            break
+
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
         stub = InvocationServiceStub(self.channel)
         req_header = invocationHead(vin=vin)
@@ -285,6 +344,16 @@ class VehicleAPI(VehicleBaseAPI):
             break
         return res
 
+    async def get_battery_status(self, vin: str) -> GetBatteryResponse:
+        """Fetch PHEV/BEV battery and charging status."""
+        stub = BatteryServiceStub(self.channel)
+        req = GetBatteryRequest(vin=vin)
+        metadata: list = [("vin", vin)]
+        res: GetBatteryResponse = GetBatteryResponse()
+        for res in stub.GetLatestBattery(req, metadata=metadata, timeout=TIMEOUT.seconds):
+            break
+        return res
+
     async def update_car_preference(self, vin: str, nickname: str):
         stub = CarPreferencesStub(self.channel)
         preference = Preference(nickName=nickname)
@@ -298,10 +367,11 @@ class VehicleAPI(VehicleBaseAPI):
 
 
 class Vehicle(object):
-    def __init__(self, vin, api, isAaos):
+    def __init__(self, vin, api, isAaos, supports_electric=True):
         self.vin = vin
         self._api = api
         self.isAaos = isAaos
+        self.supports_electric = supports_electric
 
         self.series_name = ""
         self.model_name = ""
@@ -327,6 +397,22 @@ class Vehicle(object):
         self.rear_right_window_open_ajar = False
         self.fuel_amount = 0
         self.fuel_average_consumption_liters_per_100_km = 0
+        self.tm_distance = None
+        self.tm_fuel_consumption = None
+        self.tm_energy_consumption = None
+        self.tm_average_speed = None
+        self.ta_distance = None
+        self.ta_fuel_consumption = None
+        self.ta_average_speed = None
+        self.battery_charge_level_percentage = None
+        self.electric_range = None
+        self.battery_charging_status = None
+        self.charger_connection_status = None
+        self.estimated_charging_time = None
+        self.charging_power = None
+        self.charge_data_source = None
+        self.charge_pile_name = None
+        self.charge_pile_address = None
         self.tank_lid_open = False
         self.availability_status = AvailabilityStatus.Available
         self.unavailable_reason = AvailabilityReason.Unspecified1
@@ -368,6 +454,8 @@ class Vehicle(object):
             "engine_status": True,
             "preference": True,
         }
+        if self.supports_electric:
+            self._data_source_status["battery"] = True
 
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
@@ -518,6 +606,8 @@ class Vehicle(object):
                 "fuel_amount": round(fuel_data.fuelAmount, 2),
                 "distance_to_empty": fuel_data.distanceToEmptyKm,
                 "fuel_average_consumption_liters_per_100_km": fuel_data.TMFuelAvgConsum,
+                "tm_fuel_consumption": fuel_data.TMFuelAvgConsum,
+                "ta_fuel_consumption": fuel_data.ATFuleAvgConsum,
             }
             
             # Set attributes
@@ -534,6 +624,108 @@ class Vehicle(object):
                 _LOGGER.warning(f"No cache available for fuel data on VIN {self.vin}")
             return
 
+    async def _parse_battery(self):
+        """Collect vehicle battery and home-pile data without mixing sources."""
+        data = {}
+        battery_ok = False
+        pile_ok = False
+
+        try:
+            battery_resp = await self._api.get_battery_status(self.vin)
+            if not battery_resp.HasField("battery"):
+                raise ValueError("BatteryService returned no battery data")
+
+            battery = battery_resp.battery
+            charging_power = battery.chargingPowerWatts / 1000
+            data.update({
+                "battery_charge_level_percentage": round(
+                    battery.batteryChargeLevelPercentage, 1
+                ),
+                "electric_range": battery.estimatedDistanceToEmptyKm,
+                "tm_energy_consumption": (
+                    battery.averageEnergyConsumptionKwhPer100Km
+                ),
+                "battery_charging_status": (
+                    "charging"
+                    if battery.chargingPowerWatts > 0
+                    else BATTERY_CHARGING_STATUS.get(
+                        battery.chargingStatus, "unknown"
+                    )
+                ),
+                "charger_connection_status": BATTERY_CONNECTION_STATUS.get(
+                    battery.chargerConnectionStatus, "unknown"
+                ),
+                "estimated_charging_time": (
+                    battery.estimatedChargingTimeToFullMinutes or None
+                ),
+                "charging_power": round(charging_power, 2),
+                "charge_data_source": "grpc_battery",
+                "charge_pile_name": None,
+                "charge_pile_address": None,
+            })
+            battery_ok = True
+        except Exception as grpc_error:
+            _LOGGER.debug(
+                "BatteryService unavailable for VIN %s: %s",
+                self.vin,
+                grpc_error,
+            )
+
+        try:
+            payload = await self._api.get_charge_pile_status(self.vin)
+            if not payload:
+                raise ValueError("No linked charge-pile data")
+
+            pile = payload["pile"]
+            status = payload["status"]
+            connector_status = _to_int(status.get("connectorStatus"))
+            charging_status = _to_int(status.get("startChargeSeqStat"))
+            charging_power = _to_float(status.get("power"))
+            is_charging = (
+                connector_status == 3
+                or charging_status == 1
+                or (charging_power is not None and charging_power > 0)
+            )
+            data.update({
+                "battery_charging_status": (
+                    "charging"
+                    if is_charging
+                    else PILE_CHARGING_STATUS.get(charging_status, "unknown")
+                ),
+                "charger_connection_status": PILE_CONNECTION_STATUS.get(
+                    connector_status, "unknown"
+                ),
+                "estimated_charging_time": _to_int(
+                    status.get("estimatedChargingTime")
+                ),
+                "charging_power": charging_power,
+                "charge_data_source": (
+                    "grpc_battery+charge_pile_api"
+                    if battery_ok
+                    else "charge_pile_api"
+                ),
+                "charge_pile_name": (
+                    pile.get("equipmentName") or pile.get("equipmentUserName")
+                ),
+                "charge_pile_address": pile.get("address"),
+            })
+            pile_ok = True
+        except Exception as pile_error:
+            _LOGGER.debug(
+                "Home charge-pile data unavailable for VIN %s: %s",
+                self.vin,
+                pile_error,
+            )
+
+        if not battery_ok and not pile_ok:
+            self._data_source_status["battery"] = False
+            self._restore_from_cache("battery")
+            return
+
+        for key, value in data.items():
+            setattr(self, key, value)
+        self._save_to_cache("battery", data)
+
     async def _parse_odometer(self):
         try:
             odometer_resp: GetOdometerResp = await self._api.get_odometer(self.vin)
@@ -543,6 +735,12 @@ class Vehicle(object):
             # Build data dict
             data = {
                 "odo_meter": odometer_data.odometerMeters / 1000,
+                "tm_distance": odometer_data.tripMeterManualKm,
+                "tm_average_speed": odometer_data.averageSpeedKmPerHour,
+                "ta_distance": odometer_data.tripMeterAutomaticKm,
+                "ta_average_speed": (
+                    odometer_data.averageSpeedKmPerHourAutomatic
+                ),
             }
             
             # Set attributes
@@ -688,6 +886,8 @@ class Vehicle(object):
                      self._parse_fuel, self._parse_availability,
                      self._parse_location, self._parse_engine_status,
                      self._parse_health, self._parse_car_preference]
+            if self.supports_electric:
+                funcs.append(self._parse_battery)
             for runf in funcs:
                 task = tg.create_task(runf())
                 tasks.append(task)
@@ -724,6 +924,12 @@ class Vehicle(object):
     async def engine_stop(self):
         await self._api.engine_control(self.vin, False, 0)
 
+    async def climatization_start(self):
+        await self._api.climatization_control(self.vin, True)
+
+    async def climatization_stop(self):
+        await self._api.climatization_control(self.vin, False)
+
     def get(self, key):
         if not hasattr(self, key):
             raise Exception(f"{key} not found")
@@ -740,3 +946,19 @@ class Vehicle(object):
 
     async def sunroof_control_close(self):
         await self._api.sunroof_contorl(self.vin, invocationControlType.CLOSE)
+
+
+def _to_float(value):
+    """Convert an API value to float while preserving missing values."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value):
+    """Convert an API value to int while preserving missing values."""
+    number = _to_float(value)
+    return int(number) if number is not None else None
