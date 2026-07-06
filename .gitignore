@@ -13,5 +13,3 @@ htmlcov/
 
 # Local-only artifacts
 .DS_Store
-*.apk
-custom_components/volvooncall_cn/frontend/cartopview_complete_fallback.png

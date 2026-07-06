@@ -1,8 +1,4 @@
 const CARD_VERSION = "2.0.2";
-const DEFAULT_IMAGE_URL = new URL(
-  "./cartopview_complete_fallback.png",
-  import.meta.url,
-).href;
 
 const ENTITY_DEFINITIONS = {
   lock: ["lock", "lock"],
@@ -73,7 +69,7 @@ const LABELS = {
   vin: "车辆 VIN",
   name: "卡片标题",
   model: "车型",
-  image: "车辆俯视图 URL（留空使用本地素材）",
+  image: "车辆图片 URL（可选，仅支持 /local/... 或 HTTPS）",
   show_controls: "显示远程控制",
   show_statistics: "显示行程统计",
 };
@@ -235,14 +231,13 @@ class VolvoCarCard extends HTMLElement {
 
   _imageUrl() {
     const configured = String(this._config?.image || "").trim();
-    if (!configured) return DEFAULT_IMAGE_URL;
     if (
       configured.startsWith("/") ||
       configured.startsWith("https://")
     ) {
       return configured;
     }
-    return DEFAULT_IMAGE_URL;
+    return "";
   }
 
   _escape(value) {
@@ -277,6 +272,7 @@ class VolvoCarCard extends HTMLElement {
     const connection = String(this._state("connection")?.state || "").toLowerCase();
     const isOnline = !["disconnected", "offline", "false"].includes(connection);
     const charging = this._isCharging();
+    const imageUrl = this._imageUrl();
 
     this.shadowRoot.innerHTML = `${this._styles()}
       <ha-card>
@@ -326,7 +322,11 @@ class VolvoCarCard extends HTMLElement {
                 <span class="fallback-roof"></span>
                 <span class="fallback-tail"></span>
               </div>
-              <img src="${this._escape(this._imageUrl())}" alt="Volvo top view" />
+              ${
+                imageUrl
+                  ? `<img src="${this._escape(imageUrl)}" alt="Volvo vehicle" />`
+                  : ""
+              }
               ${BODY_PARTS.map((part) => this._partOverlay(part)).join("")}
               <div class="center-badge ${openParts.length ? "warning" : ""}">
                 <ha-icon icon="${
