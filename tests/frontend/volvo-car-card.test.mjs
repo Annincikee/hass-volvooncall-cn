@@ -94,6 +94,9 @@ test("supports per-entity overrides for renamed HA entities", () => {
 test("allows only same-origin or HTTPS custom images", () => {
   const card = new VolvoCarCard();
 
+  card.setConfig({ vin: "TESTVIN0000000001" });
+  assert.equal(card._imageUrl(), "");
+
   card.setConfig({ vin: "TESTVIN0000000001", image: "/local/volvo.png" });
   assert.equal(card._imageUrl(), "/local/volvo.png");
 
@@ -107,7 +110,7 @@ test("allows only same-origin or HTTPS custom images", () => {
     vin: "TESTVIN0000000001",
     image: "http://example.com/volvo.png",
   });
-  assert.notEqual(card._imageUrl(), "http://example.com/volvo.png");
+  assert.equal(card._imageUrl(), "");
 });
 
 test("suggests a Volvo statistics card from trip entities", () => {
