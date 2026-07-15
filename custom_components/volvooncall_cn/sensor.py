@@ -96,6 +96,8 @@ class VolvoSensor(VolvoEntity, SensorEntity):
                 "data_source": vehicle.charge_data_source,
                 "charge_pile_name": vehicle.charge_pile_name,
                 "charge_pile_address": vehicle.charge_pile_address,
+                "plug_and_charge_enabled": vehicle.plug_and_charge_enabled,
+                "last_charge_order": vehicle.last_charge_order,
             }
         self.async_write_ha_state()
 

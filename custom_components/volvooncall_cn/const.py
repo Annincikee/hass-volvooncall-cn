@@ -20,4 +20,7 @@ ELECTRIC_SENSOR_KEYS = (
     "charger_connection_status",
     "estimated_charging_time",
     "charging_power",
+    "charging_voltage",
+    "charging_current",
+    "charging_session_energy",
 )

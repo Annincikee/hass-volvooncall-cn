@@ -8,6 +8,7 @@ from .volvooncall_cn import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 STORE_VERSION = 1
+ACTIVE_FULL_CHARGE_STATUSES = {"charging", "smart_charging"}
 
 
 class StoreData(TypedDict, total=False):
@@ -54,6 +55,8 @@ class VolvoStore(Store[StoreData]):
         electric_range: int | float | None,
         sampled_at: str,
         data_source: str | None = None,
+        charging_status: str | None = None,
+        charging_power: int | float | str | None = None,
     ) -> bool:
         """Capture one range sample when a new 100% charge session starts."""
         self.data = self.data or await self.load_create_data()
@@ -76,7 +79,10 @@ class VolvoStore(Store[StoreData]):
                 await self.update(full_charge_session_active=False)
             return False
 
-        if session_active or electric_range is None:
+        if self._is_active_charging(charging_status, charging_power):
+            return False
+
+        if electric_range is None:
             return False
 
         try:
@@ -96,6 +102,25 @@ class VolvoStore(Store[StoreData]):
         else:
             captured_range = electric_range_value
 
+        if session_active:
+            previous_range = self.data.get("full_charge_electric_range")
+            try:
+                previous_range_value = float(previous_range)
+            except (TypeError, ValueError):
+                previous_range_value = 0
+
+            if captured_range <= previous_range_value:
+                return False
+
+            sample_update = StoreData(
+                full_charge_electric_range=captured_range,
+                full_charge_sampled_at=sampled_at,
+            )
+            if data_source is not None:
+                sample_update["full_charge_data_source"] = data_source
+            await self.update(**sample_update)
+            return True
+
         sample = StoreData(
             full_charge_electric_range=captured_range,
             full_charge_sampled_at=sampled_at,
@@ -108,3 +133,22 @@ class VolvoStore(Store[StoreData]):
             sample["full_charge_data_source"] = data_source
         await self.update(**sample)
         return True
+
+    def _is_active_charging(
+        self,
+        charging_status: str | None,
+        charging_power: int | float | str | None,
+    ) -> bool:
+        if (
+            charging_status
+            and str(charging_status).lower() in ACTIVE_FULL_CHARGE_STATUSES
+        ):
+            return True
+
+        if charging_power is None:
+            return False
+        try:
+            charging_power_value = float(charging_power)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(charging_power_value) and charging_power_value > 0
