@@ -302,6 +302,8 @@ class VolvoCoordinator(DataUpdateCoordinator):
                                 vehicle.electric_range,
                                 datetime.now(timezone.utc).isoformat(),
                                 vehicle.charge_data_source,
+                                vehicle.battery_charging_status,
+                                vehicle.charging_power,
                             )
                         store_datas.append(store_data)
 
@@ -573,6 +575,44 @@ metaMap = {
         "entity_id": "charging_power",
         "state_class": "measurement",
     },
+    "charging_voltage": {
+        "name": "Charging voltage",
+        "device_class": "voltage",
+        "icon": "mdi:sine-wave",
+        "unit": "V",
+        "entity_id": "charging_voltage",
+        "state_class": "measurement",
+    },
+    "charging_current": {
+        "name": "Charging current",
+        "device_class": "current",
+        "icon": "mdi:current-ac",
+        "unit": "A",
+        "entity_id": "charging_current",
+        "state_class": "measurement",
+    },
+    "charging_session_energy": {
+        "name": "Charging session energy",
+        "device_class": "energy",
+        "icon": "mdi:battery-charging-100",
+        "unit": "kWh",
+        "entity_id": "charging_session_energy",
+        "state_class": "total_increasing",
+    },
+    "home_charge_switch": {
+        "name": "Home Charge",
+        "device_class": None,
+        "icon": "mdi:ev-plug-type2",
+        "unit": "",
+        "entity_id": "home_charge_switch",
+    },
+    "plug_and_charge_switch": {
+        "name": "Plug And Charge",
+        "device_class": None,
+        "icon": "mdi:power-plug-battery",
+        "unit": "",
+        "entity_id": "plug_and_charge_switch",
+    },
     # TODO
     # "fuel_amount_level": {
     #    "name": "Fuel amount level",
@@ -635,6 +675,13 @@ metaMap = {
         "icon": "mdi:bugle",
         "unit": "",
         "entity_id": "honk",
+    },
+    "app_sign_in_button": {
+        "name": "App Sign In",
+        "device_class": None,
+        "icon": "mdi:calendar-check",
+        "unit": "",
+        "entity_id": "app_sign_in",
     },
     "tail_gate_switch": {
         "name": "Tailgate control",

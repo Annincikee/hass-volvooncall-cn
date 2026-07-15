@@ -410,6 +410,12 @@ class Vehicle(object):
         self.charger_connection_status = None
         self.estimated_charging_time = None
         self.charging_power = None
+        self.charging_voltage = None
+        self.charging_current = None
+        self.charging_session_energy = None
+        self.charge_trade_no = None
+        self.plug_and_charge_enabled = None
+        self.last_charge_order = None
         self.charge_data_source = None
         self.charge_pile_name = None
         self.charge_pile_address = None
@@ -699,6 +705,15 @@ class Vehicle(object):
                     status.get("estimatedChargingTime")
                 ),
                 "charging_power": charging_power,
+                "charging_voltage": _to_float(status.get("voltageA")),
+                "charging_current": _to_float(status.get("currentA")),
+                "charging_session_energy": _to_float(status.get("totalPower")),
+                "charge_trade_no": (
+                    status.get("startChargeSeq") or self.charge_trade_no
+                ),
+                "plug_and_charge_enabled": bool(
+                    _to_int(pile.get("plugAndChargeEnabled"))
+                ),
                 "charge_data_source": (
                     "grpc_battery+charge_pile_api"
                     if battery_ok
@@ -710,6 +725,25 @@ class Vehicle(object):
                 "charge_pile_address": pile.get("address"),
             })
             pile_ok = True
+
+            try:
+                orders = await self._api.get_charge_order_list()
+                if orders:
+                    latest = orders[0]
+                    data["last_charge_order"] = {
+                        "order_no": latest.get("orderNo"),
+                        "start_time": latest.get("startTime"),
+                        "end_time": latest.get("endTime"),
+                        "duration": latest.get("chargeUseTime"),
+                        "energy_kwh": _to_float(latest.get("chargeUsePower")),
+                        "stop_reason": latest.get("stopFailReason"),
+                    }
+            except Exception as order_error:
+                _LOGGER.debug(
+                    "Charge order history unavailable for VIN %s: %s",
+                    self.vin,
+                    order_error,
+                )
         except Exception as pile_error:
             _LOGGER.debug(
                 "Home charge-pile data unavailable for VIN %s: %s",
@@ -930,6 +964,20 @@ class Vehicle(object):
     async def climatization_stop(self):
         await self._api.climatization_control(self.vin, False)
 
+    async def start_home_charge(self):
+        result = await self._api.start_charge_pile(self.vin)
+        if result and result.get("startChargeSeq"):
+            self.charge_trade_no = result["startChargeSeq"]
+        return result
+
+    async def stop_home_charge(self):
+        if not self.charge_trade_no:
+            raise Exception("No active home-charge session to stop")
+        return await self._api.stop_charge_pile(self.charge_trade_no)
+
+    async def set_plug_and_charge(self, enabled: bool):
+        return await self._api.set_plug_and_charge(enabled)
+
     def get(self, key):
         if not hasattr(self, key):
             raise Exception(f"{key} not found")
@@ -946,6 +994,9 @@ class Vehicle(object):
 
     async def sunroof_control_close(self):
         await self._api.sunroof_contorl(self.vin, invocationControlType.CLOSE)
+
+    async def sign_in(self):
+        return await self._api.sign_in()
 
 
 def _to_float(value):

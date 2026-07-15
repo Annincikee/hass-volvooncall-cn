@@ -107,8 +107,10 @@ class VehicleBaseAPI:
                     response.raise_for_status()
                     res = await response.json(loads=json_loads)
 
-                    if not res["success"]:
-                        raise VolvoAPIError(res["errMsg"])
+                    # Some endpoints (e.g. plugAndCharge) omit "success" and
+                    # only report failure via a non-200 "code".
+                    if not res.get("success", res.get("code") == 200):
+                        raise VolvoAPIError(res.get("errMsg") or res.get("msg"))
 
                     return res
             except Exception as error:
@@ -144,16 +146,18 @@ class VehicleBaseAPI:
         })
 
         if not result:
-            return
+            raise VolvoAPIError("Login returned no response")
 
-        if not result["success"]:
-            return
+        if not result.get("success"):
+            raise VolvoAPIError(
+                f"Login rejected by server: {result.get('errMsg') or result.get('msg')}"
+            )
 
-        if not result["data"]["globalAccessToken"]:
-            return
+        if not result.get("data", {}).get("globalAccessToken"):
+            raise VolvoAPIError("Login succeeded but no globalAccessToken was returned")
 
-        if not result["data"]["accessToken"]:
-            return
+        if not result["data"].get("accessToken"):
+            raise VolvoAPIError("Login succeeded but no accessToken was returned")
 
         self._refresh_token = result["data"]["refreshToken"]
         self._vocapi_access_token = result["data"]["globalAccessToken"]
@@ -248,6 +252,114 @@ class VehicleBaseAPI:
             "pile": pile,
             "status": result["data"],
         }
+
+    async def start_charge_pile(self, vin):
+        """Start a charging session on the linked home pile."""
+        piles = await self.get_charge_piles()
+        if not piles:
+            raise VolvoAPIError("No linked charge pile")
+
+        pile = piles[0]
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            "/app/charge-pile/api/v1/api/brandHomePile/start",
+        )
+        result = await self.digitalvolvo_post(
+            url,
+            {},
+            {
+                "connectorId": pile.get("connectorId", ""),
+                "vinCode": vin,
+                "phone": self._username,
+                "memberId": pile.get("memberId", ""),
+            },
+        )
+        return result.get("data") if result else None
+
+    async def stop_charge_pile(self, start_charge_seq):
+        """Stop the charging session identified by start_charge_seq."""
+        piles = await self.get_charge_piles()
+        if not piles:
+            raise VolvoAPIError("No linked charge pile")
+
+        connector_id = piles[0].get("connectorId", "")
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            "/app/charge-pile/api/v1/api/brandHomePile/stop",
+        )
+        result = await self.digitalvolvo_post(
+            url,
+            {},
+            {
+                "startChargeSeq": start_charge_seq,
+                "connectorID": connector_id,
+                "versions": "1",
+            },
+        )
+        return result.get("data") if result else None
+
+    async def get_charge_order_list(self, connector_id=None):
+        """Return the charging session history for a linked home pile.
+
+        Defaults to the first linked pile when connector_id is omitted.
+        """
+        if connector_id is None:
+            piles = await self.get_charge_piles()
+            connector_id = piles[0].get("connectorId", "") if piles else ""
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            "/app/charge-pile/api/v1/api/brandHomePile/queryList",
+        )
+        result = await self.digitalvolvo_post(
+            url,
+            {},
+            {
+                "tradeNo": None,
+                "orderNo": None,
+                "phone": None,
+                "memberId": None,
+                "vin": None,
+                "serviceProvider": None,
+                "stationId": None,
+                "stationName": None,
+                "connectorId": connector_id,
+                "startupType": None,
+                "startTime": None,
+                "endTime": None,
+                "mainStatus": None,
+            },
+        )
+        return (result.get("data") if result else None) or []
+
+    async def set_plug_and_charge(self, enabled: bool):
+        """Toggle plug-and-charge (auto start on connect) for the home pile."""
+        piles = await self.get_charge_piles()
+        if not piles:
+            raise VolvoAPIError("No linked charge pile")
+
+        equipment_id = piles[0].get("equipmentId", "")
+        url = urljoin(DIGITALVOLVO_URL, "/app/charge-pile/plugAndCharge")
+        result = await self.digitalvolvo_post(
+            url,
+            {},
+            {
+                "enabled": 1 if enabled else 0,
+                "equipmentIdList": [equipment_id],
+            },
+        )
+        self._charge_piles_cache_expire_at = 0
+        return result
+
+    async def sign_in(self):
+        """Perform the app's daily member check-in (App 签到)."""
+        piles = await self.get_charge_piles()
+        if not piles:
+            raise VolvoAPIError("No linked charge-pile; member id unavailable for sign-in")
+
+        member_id = piles[0].get("memberId")
+        url = urljoin(DIGITALVOLVO_URL, "/app/app/newSign/signIn")
+        result = await self.digitalvolvo_post(url, {}, {"memberId": member_id})
+        return result.get("data") if result else None
 
 
 def json_loads(s):
@@ -363,7 +475,7 @@ def sign_request(url, method, body):
         'body': body,
         'uri': parsed_url.path,
         'host': "apigateway.digitalvolvo.com",
-        'query': {}
+        'query': dict(urllib.parse.parse_qsl(parsed_url.query))
     }
     key = "204114990"
     secret = "bjGqb3TvEEZ8W8QhoyhEH4IenwCnc4JQ"
