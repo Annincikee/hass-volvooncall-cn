@@ -91,11 +91,23 @@ test("supports per-entity overrides for renamed HA entities", () => {
   );
 });
 
-test("allows only same-origin or HTTPS custom images", () => {
+test("uses model-specific black assets and allows safe custom images", () => {
   const card = new VolvoCarCard();
 
   card.setConfig({ vin: "TESTVIN0000000001" });
-  assert.equal(card._imageUrl(), "");
+  assert.ok(card._imageUrl().endsWith("/assets/car-s90-black-card.webp"));
+
+  card.setConfig({
+    vin: "TESTVIN0000000001",
+    model: "xc60_t8",
+  });
+  assert.ok(card._imageUrl().endsWith("/assets/car-xc60-black-card.webp"));
+
+  card.setConfig({
+    vin: "TESTVIN0000000001",
+    model: "xc90",
+  });
+  assert.ok(card._imageUrl().endsWith("/assets/car-xc90-black-card.webp"));
 
   card.setConfig({ vin: "TESTVIN0000000001", image: "/local/volvo.png" });
   assert.equal(card._imageUrl(), "/local/volvo.png");
@@ -110,7 +122,75 @@ test("allows only same-origin or HTTPS custom images", () => {
     vin: "TESTVIN0000000001",
     image: "http://example.com/volvo.png",
   });
-  assert.equal(card._imageUrl(), "");
+  assert.ok(card._imageUrl().endsWith("/assets/car-s90-black-card.webp"));
+});
+
+test("keeps charging-pile metrics out of the built-in card", () => {
+  const card = new VolvoCarCard();
+  card.setConfig({ vin: "TESTVIN0000000001" });
+  card.hass = { states: {} };
+
+  assert.equal(card.shadowRoot.innerHTML.includes("充电功率"), false);
+  assert.equal(card.shadowRoot.innerHTML.includes("预计充满"), false);
+});
+
+test("keeps button entities actionable when Home Assistant reports unknown", async () => {
+  const calls = [];
+  const card = new VolvoCarCard();
+  card.setConfig({ vin: "TESTVIN0000000001" });
+  card.hass = {
+    states: {
+      "button.testvin0000000001_flash": {
+        entity_id: "button.testvin0000000001_flash",
+        state: "unknown",
+        attributes: {},
+      },
+    },
+    callService: async (...args) => calls.push(args),
+  };
+
+  assert.equal(card._isControlAvailable("flash"), true);
+  await card._runAction("flash");
+  assert.deepEqual(calls, [
+    ["button", "press", { entity_id: "button.testvin0000000001_flash" }],
+  ]);
+});
+
+test("prevents duplicate control calls while an action is pending", async () => {
+  const calls = [];
+  let finishCall;
+  const card = new VolvoCarCard();
+  card.setConfig({ vin: "TESTVIN0000000001" });
+  card.hass = {
+    states: {
+      "button.testvin0000000001_flash": {
+        entity_id: "button.testvin0000000001_flash",
+        state: "unknown",
+        attributes: {},
+      },
+    },
+    callService: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => {
+        finishCall = resolve;
+      });
+    },
+  };
+
+  const firstCall = card._runAction("flash");
+  const duplicateCall = card._runAction("flash");
+
+  assert.equal(card._pendingActions.has("flash"), true);
+  assert.equal(calls.length, 1);
+  assert.equal(card.shadowRoot.innerHTML.includes("发送中"), true);
+  assert.equal(card.shadowRoot.innerHTML.includes('aria-busy="true"'), true);
+
+  finishCall();
+  await Promise.all([firstCall, duplicateCall]);
+
+  assert.equal(card._pendingActions.has("flash"), false);
+  assert.equal(calls.length, 1);
+  assert.equal(card.shadowRoot.innerHTML.includes("发送中"), false);
 });
 
 test("suggests a Volvo statistics card from trip entities", () => {
@@ -175,6 +255,23 @@ test("maps open body parts to the vehicle overlay", () => {
     card._openParts().map(([key]) => key),
     ["front_left_door", "tailgate"],
   );
+});
+
+test("keeps dense open states readable by hiding overlapping car labels", () => {
+  const card = new VolvoCarCard();
+  card.setConfig({ vin: "TESTVIN0000000001" });
+  card.hass = {
+    states: {
+      "binary_sensor.testvin0000000001_front_left_door": {
+        state: "on",
+        attributes: {},
+      },
+    },
+  };
+  const part = ["front_left_door", "左前门", "door fl"];
+
+  assert.match(card._partOverlay(part, true), /part-label/);
+  assert.doesNotMatch(card._partOverlay(part, false), /part-label/);
 });
 
 test("cancelling a dangerous action does not call a service", async () => {

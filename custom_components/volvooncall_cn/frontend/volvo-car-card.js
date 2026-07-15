@@ -1,4 +1,10 @@
-const CARD_VERSION = "2.0.2";
+const CARD_VERSION = "2.2.0";
+
+const MODEL_ASSETS = {
+  s90: new URL("./assets/car-s90-black-card.webp", import.meta.url).href,
+  xc60: new URL("./assets/car-xc60-black-card.webp", import.meta.url).href,
+  xc90: new URL("./assets/car-xc90-black-card.webp", import.meta.url).href,
+};
 
 const ENTITY_DEFINITIONS = {
   lock: ["lock", "lock"],
@@ -57,8 +63,8 @@ const BODY_PARTS = [
 
 const CONTROL_DEFINITIONS = [
   ["lock", "lock", "车锁", "mdi:lock-outline"],
-  ["engine_control", "switch", "远程启动", "mdi:engine-outline"],
   ["climatization", "switch", "温度调节", "mdi:air-conditioner"],
+  ["engine_control", "switch", "远程启动", "mdi:engine-outline"],
   ["tailgate_control", "switch", "后备箱", "mdi:car-back"],
   ["sunroof_control", "switch", "天窗", "mdi:home-roof"],
   ["flash", "button", "闪灯", "mdi:car-light-high"],
@@ -69,7 +75,7 @@ const LABELS = {
   vin: "车辆 VIN",
   name: "卡片标题",
   model: "车型",
-  image: "车辆图片 URL（可选，仅支持 /local/... 或 HTTPS）",
+  image: "车辆俯视图 URL（可选，留空使用黑色内置车模）",
   show_controls: "显示远程控制",
   show_statistics: "显示行程统计",
 };
@@ -78,11 +84,30 @@ const MODEL_LABELS = {
   s90_t8: "S90 Recharge T8",
   s90: "S90",
   xc60_t8: "XC60 Recharge T8",
+  xc60: "XC60",
   xc90_t8: "XC90 Recharge T8",
+  xc90: "XC90",
   generic: "Volvo",
 };
 
+const MODEL_FAMILIES = {
+  s90_t8: "s90",
+  s90: "s90",
+  xc60_t8: "xc60",
+  xc60: "xc60",
+  xc90_t8: "xc90",
+  xc90: "xc90",
+  generic: "xc60",
+};
+
 class VolvoCarCard extends HTMLElement {
+  constructor() {
+    super();
+    this._pendingActions = new Set();
+    this._feedbackTimer = undefined;
+    this._hasRenderedVehicle = false;
+  }
+
   static getConfigForm() {
     return {
       schema: [
@@ -97,7 +122,9 @@ class VolvoCarCard extends HTMLElement {
                 { value: "s90_t8", label: "S90 T8" },
                 { value: "s90", label: "S90" },
                 { value: "xc60_t8", label: "XC60 T8" },
+                { value: "xc60", label: "XC60" },
                 { value: "xc90_t8", label: "XC90 T8" },
+                { value: "xc90", label: "XC90" },
                 { value: "generic", label: "其他车型" },
               ],
             },
@@ -131,6 +158,7 @@ class VolvoCarCard extends HTMLElement {
       ...config,
     };
     this._lastStateSignature = undefined;
+    this._hasRenderedVehicle = false;
     this._render();
   }
 
@@ -208,6 +236,13 @@ class VolvoCarCard extends HTMLElement {
     return state !== undefined && state !== "unavailable" && state !== "unknown";
   }
 
+  _isControlAvailable(key) {
+    const stateObj = this._state(key);
+    if (!stateObj || stateObj.state === "unavailable") return false;
+    if (stateObj.entity_id?.startsWith("button.")) return true;
+    return stateObj.state !== "unknown";
+  }
+
   _displayState(key, fallback = "—") {
     const stateObj = this._state(key);
     if (!stateObj || stateObj.state === "unknown" || stateObj.state === "unavailable") {
@@ -231,13 +266,14 @@ class VolvoCarCard extends HTMLElement {
 
   _imageUrl() {
     const configured = String(this._config?.image || "").trim();
-    if (
-      configured.startsWith("/") ||
-      configured.startsWith("https://")
-    ) {
+    if (configured.startsWith("/") || configured.startsWith("https://")) {
       return configured;
     }
-    return "";
+    return MODEL_ASSETS[this._modelFamily()] || MODEL_ASSETS.xc60;
+  }
+
+  _modelFamily() {
+    return MODEL_FAMILIES[this._config?.model] || "xc60";
   }
 
   _escape(value) {
@@ -267,86 +303,80 @@ class VolvoCarCard extends HTMLElement {
     const title = this._config.name || modelName;
     const openParts = this._openParts();
     const isLocked = this._state("lock")?.state === "locked";
-    const battery = this._stateNumber("battery");
-    const fuel = this._stateNumber("fuel");
+    const lockPending = this._pendingActions.has("lock");
     const connection = String(this._state("connection")?.state || "").toLowerCase();
     const isOnline = !["disconnected", "offline", "false"].includes(connection);
     const charging = this._isCharging();
     const imageUrl = this._imageUrl();
+    const modelFamily = this._modelFamily();
+    const hasElectric = this._isAvailable("electric_range") || this._isAvailable("battery");
+    const hasFuel = this._isAvailable("fuel_range") || this._isAvailable("fuel");
+    const rangeTiles = [
+      hasElectric
+        ? this._rangeTile("electric_range", "纯电续航", "battery", "electric")
+        : "",
+      hasFuel ? this._rangeTile("fuel_range", "燃油续航", "fuel", "fuel") : "",
+    ].filter(Boolean);
+    const animateIn = !this._hasRenderedVehicle && Boolean(this._hass);
 
     this.shadowRoot.innerHTML = `${this._styles()}
-      <ha-card>
+      <ha-card class="${animateIn ? "animate-in" : ""}">
         <div class="hero">
           <div class="identity">
-            <span class="eyebrow">Volvo Cars</span>
+            <span class="eyebrow">VOLVO CARS</span>
             <h2>${this._escape(title)}</h2>
-            <button class="link-value" data-more-info="${this._escape(this._entityId("odometer"))}">
-              ${this._escape(this._displayState("odometer"))}
-            </button>
+            <div class="hero-meta">
+              <span class="connection ${isOnline ? "" : "offline"}">
+                <i></i>${isOnline ? "车辆在线" : "车辆离线"}
+              </span>
+              <button class="link-value" data-more-info="${this._escape(this._entityId("odometer"))}">
+                <ha-icon icon="mdi:road-variant"></ha-icon>${this._escape(this._displayState("odometer"))}
+              </button>
+            </div>
           </div>
-          <div class="status-stack">
-            <span class="connection ${isOnline ? "" : "offline"}">
-              <span></span>${isOnline ? "已连接" : "离线"}
-            </span>
-            <button class="lock-pill ${isLocked ? "locked" : "unlocked"}"
-                    data-action="lock"
-                    ${this._isAvailable("lock") ? "" : "disabled"}
-                    aria-label="${isLocked ? "解锁车辆" : "锁定车辆"}">
-              <ha-icon icon="${isLocked ? "mdi:lock" : "mdi:lock-open-variant"}"></ha-icon>
-              <span>${isLocked ? "已锁定" : "未锁定"}</span>
-            </button>
-          </div>
+          <button class="lock-pill ${isLocked ? "locked" : "unlocked"} ${lockPending ? "pending" : ""}"
+                  data-action="lock"
+                  ${this._isControlAvailable("lock") && !lockPending ? "" : "disabled"}
+                  aria-busy="${lockPending}"
+                  aria-label="${isLocked ? "解锁车辆" : "锁定车辆"}">
+            <ha-icon class="${lockPending ? "pending-icon" : ""}" icon="${lockPending ? "mdi:loading" : isLocked ? "mdi:lock" : "mdi:lock-open-variant"}"></ha-icon>
+            <span>${lockPending ? "发送中" : isLocked ? "已锁定" : "未锁定"}</span>
+          </button>
         </div>
 
-        <div class="range-band">
-          ${this._rangeTile("electric_range", "纯电续航", "mdi:lightning-bolt", "electric")}
-          ${this._rangeTile("fuel_range", "燃油续航", "mdi:gas-station", "fuel")}
-        </div>
-
-        <div class="energy-grid">
-          ${this._levelTile("battery", "动力电池", battery, "%", "mdi:battery-high")}
-          ${this._levelTile("fuel", "燃油余量", fuel, "L", "mdi:fuel")}
-          ${this._metricTile("charging_power", "充电功率", "mdi:ev-station")}
-          ${this._metricTile("charging_time", "预计充满", "mdi:timer-outline")}
+        <div class="range-band ${rangeTiles.length === 1 ? "single" : ""}">
+          ${rangeTiles.join("") || `<div class="range-empty">续航数据同步中</div>`}
         </div>
 
         <div class="vehicle-area">
           <div class="vehicle-visual">
-            <div class="car-canvas ${openParts.length ? "has-warning" : ""}">
-              <div class="fallback-car" aria-hidden="true">
-                <span class="fallback-shadow"></span>
-                <span class="fallback-body"></span>
-                <span class="fallback-hood"></span>
-                <span class="fallback-glass front"></span>
-                <span class="fallback-glass rear"></span>
-                <span class="fallback-roof"></span>
-                <span class="fallback-tail"></span>
-              </div>
-              ${
-                imageUrl
-                  ? `<img src="${this._escape(imageUrl)}" alt="Volvo vehicle" />`
-                  : ""
-              }
-              ${BODY_PARTS.map((part) => this._partOverlay(part)).join("")}
-              <div class="center-badge ${openParts.length ? "warning" : ""}">
-                <ha-icon icon="${
-                  openParts.length
-                    ? "mdi:alert-circle"
-                    : isLocked
-                      ? "mdi:shield-lock"
-                      : "mdi:check-circle"
-                }"></ha-icon>
-                <span>${this._escape(this._vehicleSummary(isLocked, openParts))}</span>
-              </div>
+            <div class="car-canvas model-${modelFamily} ${openParts.length ? "has-warning" : ""}">
+              <img src="${this._escape(imageUrl)}" alt="${this._escape(modelName)} 黑色车辆俯视图" />
+              ${BODY_PARTS.map((part) => this._partOverlay(part, openParts.length <= 2)).join("")}
+            </div>
+            <div class="vehicle-summary ${openParts.length ? "warning" : "ok"}">
+              <ha-icon icon="${openParts.length ? "mdi:alert-circle" : isLocked ? "mdi:shield-lock" : "mdi:check-circle"}"></ha-icon>
+              <span>${this._escape(this._vehicleSummary(isLocked, openParts))}</span>
             </div>
           </div>
           <div class="state-panel">
-            ${this._stateRow("lock", "车辆锁", isLocked ? "已锁定" : "未锁定", isLocked ? "ok" : "warn")}
-            ${this._stateRow("charging_status", "充电状态", this._displayState("charging_status"), charging ? "charge" : "")}
-            ${this._stateRow("full_charge_range", "最近满电续航", this._displayState("full_charge_range"), "charge")}
-            ${this._stateRow("engine", "发动机", this._isOn("engine") ? "运行中" : "关闭", this._isOn("engine") ? "warn" : "")}
+            <div class="state-heading">
+              <span>车辆状态</span>
+              <small class="${openParts.length ? "warn" : "ok"}">${openParts.length ? "请检查" : "状态正常"}</small>
+            </div>
+            ${this._stateRow("engine", "发动机", this._isOn("engine") ? "运行中" : "关闭", this._isOn("engine") ? "warn" : "", "mdi:engine-outline")}
+            ${
+              this._isAvailable("charging_status")
+                ? this._stateRow("charging_status", "充电状态", this._displayState("charging_status"), charging ? "charge" : "", "mdi:battery-charging")
+                : ""
+            }
+            ${
+              this._isAvailable("full_charge_range")
+                ? this._stateRow("full_charge_range", "最近满电", this._displayState("full_charge_range"), "charge", "mdi:map-marker-distance")
+                : ""
+            }
             <div class="open-list">
-              <span>开口状态</span>
+              <span><b>门窗与舱盖</b><small>${openParts.length ? `${openParts.length} 项需检查` : "全部关闭"}</small></span>
               <div>
                 ${
                   openParts.length
@@ -365,17 +395,18 @@ class VolvoCarCard extends HTMLElement {
             ? ""
             : `<div class="statistics">
                 <div class="section-title">
-                  <span>行程统计</span>
+                  <div><ha-icon icon="mdi:chart-timeline-variant"></ha-icon><span>行程统计</span></div>
                   <small>TM 手动复位 · TA 自动复位</small>
                 </div>
-                <div class="trip-grid">
-                  ${this._tripBlock("TM", [
+                <div class="trip-table">
+                  <div class="trip-labels"><span></span><span>里程</span><span>均速</span><span>油耗</span><span>电耗</span></div>
+                  ${this._tripRow("TM", [
                     ["tm_distance", "里程"],
                     ["tm_average_speed", "均速"],
                     ["tm_fuel_consumption", "油耗"],
                     ["tm_energy_consumption", "电耗"],
                   ])}
-                  ${this._tripBlock("TA", [
+                  ${this._tripRow("TA", [
                     ["ta_distance", "里程"],
                     ["ta_average_speed", "均速"],
                     ["ta_fuel_consumption", "油耗"],
@@ -389,7 +420,7 @@ class VolvoCarCard extends HTMLElement {
             ? ""
             : `<div class="controls-wrap">
                 <div class="section-title">
-                  <span>远程控制</span>
+                  <div><ha-icon icon="mdi:car-key"></ha-icon><span>远程控制</span></div>
                   <small>关键操作会二次确认</small>
                 </div>
                 <div class="controls">
@@ -407,10 +438,13 @@ class VolvoCarCard extends HTMLElement {
             <button class="dialog-confirm">确认</button>
           </div>
         </dialog>
-        <div class="error" hidden></div>
+        <div class="feedback" role="status" aria-live="polite" hidden>
+          <ha-icon icon="mdi:check-circle"></ha-icon><span></span>
+        </div>
       </ha-card>`;
 
     this._bindEvents();
+    if (this._hass) this._hasRenderedVehicle = true;
   }
 
   _isCharging() {
@@ -425,42 +459,24 @@ class VolvoCarCard extends HTMLElement {
 
   _vehicleSummary(isLocked, openParts) {
     if (openParts.length) return `${openParts.length} 处未关闭`;
-    return isLocked ? "车辆已锁闭" : "车门车窗已关闭";
+    return isLocked ? "车辆安全锁闭" : "门窗均已关闭";
   }
 
-  _rangeTile(key, label, icon, tone) {
+  _rangeTile(key, label, levelKey, tone) {
     const value = this._displayState(key);
+    const level = this._stateNumber(levelKey);
+    const percentage = Number.isFinite(level) ? Math.max(0, Math.min(100, level)) : 0;
+    const levelText = this._displayState(levelKey);
+    const icon = tone === "electric" ? "mdi:lightning-bolt" : "mdi:gas-station";
     return `
       <button class="range-tile ${tone}" data-more-info="${this._escape(this._entityId(key))}">
-        <span class="range-icon"><ha-icon icon="${icon}"></ha-icon></span>
-        <span class="range-copy">
-          <strong>${this._escape(value)}</strong>
-          <span>${label}</span>
-        </span>
+        <span class="range-top"><span><ha-icon icon="${icon}"></ha-icon>${label}</span><small>${this._escape(levelText)}</small></span>
+        <strong>${this._escape(value)}</strong>
+        <span class="level-track" aria-hidden="true"><i style="width:${percentage}%"></i></span>
       </button>`;
   }
 
-  _levelTile(key, label, value, unit, icon) {
-    const numeric = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
-    const display = this._displayState(key);
-    return `
-      <button class="level-tile" data-more-info="${this._escape(this._entityId(key))}">
-        <span class="tile-heading"><ha-icon icon="${icon}"></ha-icon>${label}</span>
-        <strong>${this._escape(display)}</strong>
-        <span class="level-track" aria-hidden="true"><span style="width:${numeric}%"></span></span>
-      </button>`;
-  }
-
-  _metricTile(key, label, icon) {
-    return `
-      <button class="level-tile compact ${this._isAvailable(key) ? "" : "unavailable"}"
-              data-more-info="${this._escape(this._entityId(key))}">
-        <span class="tile-heading"><ha-icon icon="${icon}"></ha-icon>${label}</span>
-        <strong>${this._escape(this._displayState(key))}</strong>
-      </button>`;
-  }
-
-  _partOverlay(part) {
+  _partOverlay(part, showLabel = true) {
     const [key, label, className] = part;
     const isOpen = this._isOn(key);
     const entityId = this._entityId(key) || "";
@@ -470,54 +486,73 @@ class VolvoCarCard extends HTMLElement {
               title="${label} · ${isOpen ? "已打开" : "已关闭"}"
               data-more-info="${this._escape(entityId)}">
         <span class="part-dot"></span>
-        ${isOpen ? `<span class="part-label">${label}</span>` : ""}
+        ${isOpen && showLabel ? `<span class="part-label">${label}</span>` : ""}
       </button>`;
   }
 
-  _stateRow(key, label, value, tone) {
+  _stateRow(key, label, value, tone, icon) {
     return `<button class="state-row ${tone || ""} ${this._isAvailable(key) ? "" : "missing"}"
                     data-more-info="${this._escape(this._entityId(key))}">
-              <span>${label}</span><strong>${this._escape(value)}</strong>
+              <span class="row-label">${icon ? `<ha-icon icon="${icon}"></ha-icon>` : ""}<span>${label}</span></span>
+              <strong>${this._escape(value)}</strong>
             </button>`;
   }
 
-  _tripBlock(title, rows) {
+  _tripRow(title, rows) {
     return `
-      <div class="trip-block">
-        <span class="trip-title">${title}</span>
-        <div class="trip-metrics">
-          ${rows
-            .map(([key, label]) => `
-              <button data-more-info="${this._escape(this._entityId(key))}">
-                <strong>${this._escape(this._displayState(key))}</strong>
-                <span>${label}</span>
-              </button>`)
-            .join("")}
-        </div>
+      <div class="trip-row">
+        <strong class="trip-title">${title}</strong>
+        ${rows
+          .map(([key, label]) => {
+            const state = this._state(key);
+            const available = this._isAvailable(key);
+            const value = available ? state.state : "—";
+            const unit = available ? state.attributes?.unit_of_measurement || "" : "";
+            return `
+              <button data-more-info="${this._escape(this._entityId(key))}" aria-label="${title} ${label} ${this._escape(this._displayState(key))}">
+                <strong>${this._escape(value)}</strong>
+                <span>${this._escape(unit)}</span>
+              </button>`;
+          })
+          .join("")}
+        ${rows.length < 4 ? `<span class="trip-na" aria-label="TA 电耗无原始数据">—</span>` : ""}
       </div>`;
   }
 
   _control(control) {
     const [key, kind, label, icon] = control;
     const stateObj = this._state(key);
-    const available = this._isAvailable(key);
+    const available = this._isControlAvailable(key);
+    const pending = this._pendingActions.has(key);
     const active =
       kind === "lock" ? stateObj?.state === "locked" : stateObj?.state === "on";
-    const dynamicLabel =
-      kind === "lock" ? (active ? "已锁车" : "未锁车") : label;
+    let dynamicLabel = label;
+    if (kind === "lock") dynamicLabel = active ? "已锁车" : "未锁车";
+    if (key === "engine_control" && active) dynamicLabel = "停止发动机";
+    if (key === "climatization" && active) dynamicLabel = "关闭空调";
+    if (key === "tailgate_control" && active) dynamicLabel = "关闭后备箱";
+    if (key === "sunroof_control" && active) dynamicLabel = "关闭天窗";
     return `
-      <button class="control ${active ? "active" : ""}"
+      <button class="control ${active ? "active" : ""} ${pending ? "pending" : ""}"
               data-action="${key}"
-              ${available ? "" : "disabled"}
+              ${available && !pending ? "" : "disabled"}
+              aria-busy="${pending}"
               aria-label="${dynamicLabel}">
-        <span class="control-icon"><ha-icon icon="${icon}"></ha-icon></span>
-        <span>${dynamicLabel}</span>
+        <span class="control-icon"><ha-icon class="${pending ? "pending-icon" : ""}" icon="${pending ? "mdi:loading" : icon}"></ha-icon></span>
+        <span>${pending ? "发送中" : dynamicLabel}</span>
       </button>`;
   }
 
   _bindEvents() {
     const image = this.shadowRoot.querySelector(".car-canvas img");
     image?.addEventListener("error", () => {
+      const fallbackUrl = MODEL_ASSETS[this._modelFamily()] || MODEL_ASSETS.xc60;
+      if (!image.dataset.fallbackTried && image.src !== fallbackUrl) {
+        image.dataset.fallbackTried = "true";
+        image.src = fallbackUrl;
+        image.alt = `${MODEL_LABELS[this._config.model] || "Volvo"} 黑色车辆俯视图`;
+        return;
+      }
       image.hidden = true;
       this.shadowRoot.querySelector(".car-canvas")?.classList.add("image-failed");
     });
@@ -540,6 +575,7 @@ class VolvoCarCard extends HTMLElement {
   }
 
   async _runAction(key) {
+    if (this._pendingActions.has(key)) return;
     const entityId = this._entityId(key);
     const stateObj = entityId ? this._hass?.states?.[entityId] : undefined;
     if (!entityId || !stateObj) return;
@@ -566,12 +602,32 @@ class VolvoCarCard extends HTMLElement {
     }
 
     if (message && !(await this._confirm(message))) return;
+    this._pendingActions.add(key);
+    this._render();
+    let feedbackMessage = "指令已发送";
+    let feedbackTone = "success";
     try {
       await this._hass.callService(domain, service, { entity_id: entityId });
-      this._showError("");
+      feedbackMessage = this._actionSuccessMessage(key, service);
     } catch (error) {
-      this._showError(`操作失败：${error?.message || error}`);
+      feedbackMessage = `操作失败：${error?.message || error}`;
+      feedbackTone = "error";
+    } finally {
+      this._pendingActions.delete(key);
+      this._render();
+      this._showFeedback(feedbackMessage, feedbackTone);
     }
+  }
+
+  _actionSuccessMessage(key, service) {
+    if (key === "lock") return service === "unlock" ? "解锁指令已发送" : "锁车指令已发送";
+    if (key === "engine_control") return service === "turn_on" ? "远程启动指令已发送" : "停止发动机指令已发送";
+    if (key === "climatization") return service === "turn_on" ? "温度调节已开启" : "温度调节已关闭";
+    if (key === "tailgate_control") return "后备箱指令已发送";
+    if (key === "sunroof_control") return "天窗指令已发送";
+    if (key === "flash") return "闪灯指令已发送";
+    if (key === "honk_flash") return "鸣笛闪灯指令已发送";
+    return "指令已发送";
   }
 
   _confirm(message) {
@@ -601,11 +657,22 @@ class VolvoCarCard extends HTMLElement {
     });
   }
 
-  _showError(message) {
-    const element = this.shadowRoot?.querySelector(".error");
+  _showFeedback(message, tone = "success") {
+    const element = this.shadowRoot?.querySelector(".feedback");
     if (!element) return;
+    if (this._feedbackTimer) clearTimeout(this._feedbackTimer);
     element.hidden = !message;
-    element.textContent = message;
+    element.classList.toggle("error", tone === "error");
+    const icon = element.querySelector("ha-icon");
+    if (icon) icon.setAttribute("icon", tone === "error" ? "mdi:alert-circle" : "mdi:check-circle");
+    const text = element.querySelector("span");
+    if (text) text.textContent = message;
+    if (!message) return;
+    this._feedbackTimer = setTimeout(() => {
+      element.hidden = true;
+      this._feedbackTimer = undefined;
+    }, 3200);
+    this._feedbackTimer?.unref?.();
   }
 
   _styles() {
@@ -614,253 +681,198 @@ class VolvoCarCard extends HTMLElement {
         --voc-text: var(--primary-text-color, #141414);
         --voc-secondary: var(--secondary-text-color, #707070);
         --voc-bg: var(--ha-card-background, var(--card-background-color, #fff));
-        --voc-surface: color-mix(in srgb, var(--voc-bg) 94%, var(--voc-text));
-        --voc-subtle: color-mix(in srgb, var(--voc-bg) 88%, var(--voc-text));
-        --voc-line: color-mix(in srgb, var(--voc-text) 14%, transparent);
+        --voc-panel: color-mix(in srgb, var(--voc-bg) 97%, var(--voc-text));
+        --voc-surface: color-mix(in srgb, var(--voc-bg) 95%, var(--voc-text));
+        --voc-surface-strong: color-mix(in srgb, var(--voc-bg) 90%, var(--voc-text));
+        --voc-line: color-mix(in srgb, var(--voc-text) 13%, transparent);
+        --voc-line-soft: color-mix(in srgb, var(--voc-text) 8%, transparent);
         --voc-blue: #1c6eba;
-        --voc-brand: #284e80;
         --voc-warning: #cd2314;
+        --voc-orange: #eb7400;
         --voc-positive: #04721c;
+        --voc-accent: color-mix(in srgb, var(--voc-blue) 74%, var(--voc-text));
+        --voc-danger: color-mix(in srgb, var(--voc-warning) 72%, var(--voc-text));
+        --voc-success: color-mix(in srgb, var(--voc-positive) 72%, var(--voc-text));
         display: block;
+        container-type: inline-size;
         color: var(--voc-text);
         font-family: var(--ha-font-family-body, "Helvetica Neue", Arial, sans-serif);
       }
       * { box-sizing: border-box; }
-      button { font: inherit; }
+      button { font: inherit; -webkit-tap-highlight-color: transparent; }
       ha-card {
+        position: relative;
         display: block;
         overflow: hidden;
+        container-type: inline-size;
         background: var(--voc-bg);
-        border-radius: var(--ha-card-border-radius, 14px);
+        border: 1px solid var(--voc-line-soft);
+        border-radius: var(--ha-card-border-radius, 18px);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, .08);
       }
       .hero {
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         justify-content: space-between;
-        gap: 16px;
-        padding: 22px 22px 14px;
+        gap: 18px;
+        padding: 22px 22px 16px;
       }
       .identity { min-width: 0; }
       .eyebrow {
         display: block;
-        margin-bottom: 4px;
+        margin-bottom: 5px;
         color: var(--voc-secondary);
-        font-size: 10px;
+        font-size: 9px;
         font-weight: 600;
+        letter-spacing: .18em;
         text-transform: uppercase;
       }
       h2 {
         margin: 0;
-        font-size: 24px;
-        font-weight: 400;
-        letter-spacing: 0;
-        line-height: 1.15;
-      }
-      .link-value {
-        border: 0;
-        padding: 5px 0 0;
-        background: none;
-        color: var(--voc-secondary);
-        cursor: pointer;
-        font-size: 12px;
-      }
-      .status-stack { display: flex; align-items: center; gap: 10px; }
-      .connection {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        color: var(--voc-secondary);
-        font-size: 11px;
+        overflow: hidden;
+        font-size: 27px;
+        font-weight: 450;
+        letter-spacing: -.025em;
+        line-height: 1.08;
+        text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .connection > span { width: 6px; height: 6px; border-radius: 50%; background: var(--voc-positive); }
-      .connection.offline > span { background: var(--voc-warning); }
-      .lock-pill {
-        min-height: 38px;
+      .hero-meta {
+        min-height: 20px;
+        padding-top: 7px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--voc-secondary);
+        font-size: 10px;
+      }
+      .connection { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .connection i { width: 6px; height: 6px; border-radius: 50%; background: var(--voc-positive); }
+      .connection.offline i { background: var(--voc-warning); }
+      .hero-meta::after { width: 1px; height: 11px; background: var(--voc-line); content: ""; order: 1; }
+      .link-value {
+        min-width: 0;
         border: 0;
-        border-radius: 19px;
-        padding: 0 12px;
+        padding: 0;
         display: inline-flex;
         align-items: center;
+        gap: 4px;
+        order: 2;
+        background: none;
+        color: inherit;
+        cursor: pointer;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .link-value ha-icon { --mdc-icon-size: 13px; }
+      .lock-pill {
+        min-width: 94px;
+        min-height: 46px;
+        border: 1px solid var(--voc-line);
+        border-radius: 24px;
+        padding: 0 15px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         gap: 7px;
         background: var(--voc-surface);
         color: var(--voc-text);
         cursor: pointer;
-        font-size: 12px;
+        flex: 0 0 auto;
+        font-size: 11px;
+        font-weight: 550;
+        transition: transform .18s ease, box-shadow .18s ease, background-color .18s ease, color .18s ease;
       }
-      .lock-pill ha-icon { --mdc-icon-size: 17px; }
-      .lock-pill.locked { background: var(--voc-text); color: var(--voc-bg); }
+      .lock-pill ha-icon { --mdc-icon-size: 18px; }
+      .lock-pill.locked { border-color: var(--voc-text); background: var(--voc-text); color: var(--voc-bg); }
+      .lock-pill.unlocked { border-color: color-mix(in srgb, var(--voc-warning) 55%, transparent); color: var(--voc-danger); }
       .lock-pill:disabled { opacity: .4; cursor: default; }
+      .lock-pill.pending:disabled { opacity: .78; }
       .range-band {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 1px;
+        gap: 10px;
         margin: 0 22px;
-        background: var(--voc-line);
-        border-block: 1px solid var(--voc-line);
       }
+      .range-band.single { grid-template-columns: 1fr; }
       .range-tile {
         min-width: 0;
-        min-height: 78px;
-        border: 0;
-        padding: 14px 16px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        background: var(--voc-bg);
-        color: var(--voc-text);
-        text-align: left;
-        cursor: pointer;
-      }
-      .range-icon {
-        width: 38px;
-        height: 38px;
-        border-radius: 50%;
-        display: grid;
-        place-items: center;
-        background: var(--voc-surface);
-        color: var(--voc-blue);
-        flex: 0 0 auto;
-      }
-      .range-icon ha-icon { --mdc-icon-size: 19px; }
-      .range-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-      .range-copy strong { overflow: hidden; font-size: 22px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-      .range-copy span { color: var(--voc-secondary); font-size: 11px; }
-      .range-tile.fuel .range-icon { color: #735f32; }
-      .energy-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 8px;
-        padding: 14px 22px 10px;
-      }
-      .level-tile {
-        min-width: 0;
-        min-height: 84px;
-        border: 0;
-        border-radius: 10px;
-        padding: 11px;
+        min-height: 102px;
+        border: 1px solid var(--voc-line-soft);
+        border-radius: 14px;
+        padding: 13px 15px 14px;
         display: flex;
         flex-direction: column;
+        align-items: stretch;
         justify-content: space-between;
+        gap: 7px;
         background: var(--voc-surface);
         color: var(--voc-text);
         text-align: left;
         cursor: pointer;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, .035);
+        transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
       }
-      .level-tile.compact { min-height: 72px; }
-      .level-tile.unavailable { opacity: .45; }
-      .tile-heading {
+      .range-top {
         display: flex;
         align-items: center;
-        gap: 6px;
+        justify-content: space-between;
+        gap: 8px;
         color: var(--voc-secondary);
         font-size: 10px;
       }
-      .tile-heading ha-icon { --mdc-icon-size: 15px; color: var(--voc-blue); }
-      .level-tile strong {
+      .range-top > span { display: inline-flex; align-items: center; gap: 5px; }
+      .range-top ha-icon { --mdc-icon-size: 15px; color: var(--voc-blue); }
+      .range-top small { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+      .range-tile.fuel .range-top ha-icon { color: var(--voc-orange); }
+      .range-tile > strong {
         overflow: hidden;
-        font-size: 16px;
-        font-weight: 500;
+        font-size: 25px;
+        font-weight: 450;
+        letter-spacing: -.02em;
+        line-height: 1.1;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
       .level-track {
-        height: 3px;
+        height: 4px;
         overflow: hidden;
         border-radius: 999px;
         background: color-mix(in srgb, var(--voc-text) 12%, transparent);
       }
-      .level-track span {
+      .level-track i {
         display: block;
         height: 100%;
         border-radius: inherit;
         background: var(--voc-blue);
+        transform-origin: left center;
       }
+      .range-tile.fuel .level-track i { background: var(--voc-orange); }
+      .range-empty { min-height: 72px; border-radius: 14px; display: grid; place-items: center; background: var(--voc-surface); color: var(--voc-secondary); font-size: 11px; }
       .vehicle-area {
         display: grid;
-        grid-template-columns: minmax(180px, .82fr) minmax(210px, 1.18fr);
-        gap: 14px;
-        padding: 10px 22px 18px;
+        grid-template-columns: minmax(184px, 1.08fr) minmax(156px, .92fr);
+        gap: 18px;
+        margin: 16px 22px 18px;
+        border: 1px solid var(--voc-line-soft);
+        border-radius: 18px;
+        padding: 17px 16px 16px;
+        background: var(--voc-panel);
+        box-shadow: inset 0 1px 0 color-mix(in srgb, var(--voc-bg) 72%, transparent), 0 12px 28px rgba(0, 0, 0, .04);
       }
-      .vehicle-visual { min-width: 0; display: flex; justify-content: center; }
+      .vehicle-visual { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
       .car-canvas {
         position: relative;
-        width: min(100%, 220px);
-        aspect-ratio: 1248 / 2687;
+        width: min(100%, 208px);
+        aspect-ratio: 700 / 1500;
         isolation: isolate;
+        --hood-top: 5%;
+        --front-row: 32%;
+        --rear-row: 52.5%;
+        --tail-top: 80.5%;
       }
-      .fallback-car {
-        position: absolute;
-        inset: 0;
-        z-index: 0;
-        pointer-events: none;
-      }
-      .fallback-car span { position: absolute; display: block; }
-      .fallback-shadow {
-        left: 24%;
-        top: 8%;
-        width: 52%;
-        height: 86%;
-        border-radius: 48% 48% 40% 40%;
-        background: radial-gradient(ellipse at center, rgba(0,0,0,.18), rgba(0,0,0,0) 68%);
-        filter: blur(12px);
-      }
-      .fallback-body {
-        left: 27%;
-        top: 5%;
-        width: 46%;
-        height: 90%;
-        border: 1px solid color-mix(in srgb, var(--voc-text) 18%, transparent);
-        border-radius: 48% 48% 38% 38% / 10% 10% 8% 8%;
-        background:
-          linear-gradient(90deg, rgba(255,255,255,.18), transparent 22%, transparent 78%, rgba(0,0,0,.08)),
-          linear-gradient(180deg, #f7f8fa 0%, #d9dde3 42%, #c7cdd5 100%);
-        box-shadow: inset 0 0 0 8px rgba(255,255,255,.16), inset 0 -32px 38px rgba(0,0,0,.08);
-      }
-      .fallback-hood {
-        left: 31%;
-        top: 13%;
-        width: 38%;
-        height: 21%;
-        border-radius: 44% 44% 18% 18%;
-        background: linear-gradient(180deg, rgba(255,255,255,.45), rgba(255,255,255,.06));
-        border-bottom: 1px solid rgba(0,0,0,.1);
-      }
-      .fallback-glass {
-        left: 34%;
-        width: 32%;
-        border: 1px solid rgba(255,255,255,.38);
-        background: linear-gradient(180deg, #70849b, #2c3946);
-        opacity: .88;
-      }
-      .fallback-glass.front {
-        top: 35%;
-        height: 14%;
-        border-radius: 42% 42% 10% 10%;
-      }
-      .fallback-glass.rear {
-        top: 61%;
-        height: 12%;
-        border-radius: 10% 10% 38% 38%;
-      }
-      .fallback-roof {
-        left: 35%;
-        top: 48%;
-        width: 30%;
-        height: 13%;
-        border-radius: 24%;
-        background: linear-gradient(180deg, #dfe4ea, #b6bec8);
-        box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
-      }
-      .fallback-tail {
-        left: 32%;
-        top: 78%;
-        width: 36%;
-        height: 10%;
-        border-top: 1px solid rgba(0,0,0,.1);
-        border-radius: 0 0 42% 42%;
-        background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(0,0,0,.08));
-      }
+      .car-canvas.model-s90 { --hood-top: 4%; --front-row: 32%; --rear-row: 52.5%; --tail-top: 81%; }
+      .car-canvas.model-xc90 { --hood-top: 5%; --front-row: 32%; --rear-row: 52.5%; --tail-top: 80%; }
       .car-canvas img {
         position: relative;
         z-index: 1;
@@ -868,7 +880,7 @@ class VolvoCarCard extends HTMLElement {
         height: 100%;
         object-fit: contain;
         display: block;
-        filter: drop-shadow(0 14px 16px rgba(0,0,0,.12));
+        filter: drop-shadow(0 14px 13px rgba(0,0,0,.22));
       }
       .car-canvas img[hidden] { display: none; }
       .part {
@@ -881,9 +893,10 @@ class VolvoCarCard extends HTMLElement {
         cursor: pointer;
       }
       .part.open {
-        border-color: color-mix(in srgb, var(--voc-warning) 85%, white);
-        background: color-mix(in srgb, var(--voc-warning) 23%, transparent);
-        box-shadow: 0 0 18px color-mix(in srgb, var(--voc-warning) 42%, transparent), inset 0 0 12px rgba(255,255,255,.18);
+        border-color: transparent;
+        background: transparent;
+        box-shadow: none;
+        animation: voc-warning-in .34s ease-out both;
       }
       .part-dot {
         position: absolute;
@@ -899,168 +912,205 @@ class VolvoCarCard extends HTMLElement {
       .part-label {
         position: absolute;
         z-index: 3;
-        padding: 3px 6px;
-        border-radius: 8px;
+        padding: 4px 7px;
+        border-radius: 9px;
         background: var(--voc-warning);
-        box-shadow: 0 3px 10px rgba(0,0,0,.22);
+        box-shadow: 0 2px 7px rgba(0,0,0,.2);
         font-size: 9px;
         font-weight: 600;
+        pointer-events: none;
         white-space: nowrap;
       }
-      .hood { left: 22%; top: 12%; width: 56%; height: 22%; clip-path: polygon(12% 5%, 88% 5%, 100% 88%, 0 88%); }
+      .hood { left: 11%; top: var(--hood-top); width: 78%; height: 26%; clip-path: polygon(12% 5%, 88% 5%, 100% 88%, 0 88%); }
       .hood .part-dot { right: 45%; bottom: 8%; }
-      .hood .part-label { left: 50%; bottom: -2px; transform: translate(-50%, 100%); }
-      .door { width: 29%; height: 18%; }
-      .door.fl { left: 6%; top: 37%; clip-path: polygon(20% 0, 100% 8%, 94% 100%, 2% 92%); }
-      .door.fr { right: 6%; top: 37%; clip-path: polygon(0 8%, 80% 0, 98% 92%, 6% 100%); }
-      .door.rl { left: 7%; top: 55%; clip-path: polygon(2% 8%, 94% 0, 100% 92%, 20% 100%); }
-      .door.rr { right: 7%; top: 55%; clip-path: polygon(6% 0, 98% 8%, 80% 100%, 0 92%); }
+      .hood .part-label { left: 50%; bottom: 8%; transform: translate(-50%, 0); }
+      .door { width: 38%; height: 21%; }
+      .door.fl { left: 5%; top: var(--front-row); clip-path: polygon(20% 0, 100% 8%, 94% 100%, 2% 92%); }
+      .door.fr { right: 5%; top: var(--front-row); clip-path: polygon(0 8%, 80% 0, 98% 92%, 6% 100%); }
+      .door.rl { left: 5%; top: var(--rear-row); clip-path: polygon(2% 8%, 94% 0, 100% 92%, 20% 100%); }
+      .door.rr { right: 5%; top: var(--rear-row); clip-path: polygon(6% 0, 98% 8%, 80% 100%, 0 92%); }
       .door.fl .part-dot, .door.rl .part-dot { left: 5%; top: 43%; }
       .door.fr .part-dot, .door.rr .part-dot { right: 5%; top: 43%; }
-      .door.fl .part-label, .door.rl .part-label { left: 0; top: 50%; transform: translate(-88%, -50%); }
-      .door.fr .part-label, .door.rr .part-label { right: 0; top: 50%; transform: translate(88%, -50%); }
-      .window { width: 13%; height: 16%; border-radius: 40%; }
-      .window.wfl { left: 23%; top: 35%; }
-      .window.wfr { right: 23%; top: 35%; }
-      .window.wrl { left: 24%; top: 53%; }
-      .window.wrr { right: 24%; top: 53%; }
+      .door .part-label { left: 50%; top: 76%; transform: translate(-50%, -50%); }
+      .window { width: 16%; height: 20%; border-radius: 40%; }
+      .window.wfl { left: 24.5%; top: calc(var(--front-row) - 1%); }
+      .window.wfr { right: 24.5%; top: calc(var(--front-row) - 1%); }
+      .window.wrl { left: 24.5%; top: calc(var(--rear-row) - 1%); }
+      .window.wrr { right: 24.5%; top: calc(var(--rear-row) - 1%); }
       .window .part-dot { left: 50%; top: 50%; transform: translate(-50%, -50%); }
-      .window .part-label { left: 50%; top: 50%; transform: translate(-50%, -50%); }
-      .sunroof { left: 34%; top: 42%; width: 32%; height: 24%; border-radius: 32% 32% 22% 22%; }
+      .window .part-label { left: 50%; top: 30%; transform: translate(-50%, -50%); }
+      .sunroof { left: 30%; top: 40.5%; width: 40%; height: 29%; border-radius: 32% 32% 22% 22%; }
       .sunroof .part-dot { left: calc(50% - 4px); top: 10%; }
       .sunroof .part-label { left: 50%; top: 50%; transform: translate(-50%, -50%); }
-      .tailgate { left: 22%; top: 78%; width: 56%; height: 14%; clip-path: polygon(0 10%, 100% 10%, 90% 94%, 10% 94%); }
+      .tailgate { left: 14%; top: var(--tail-top); width: 72%; height: 14%; clip-path: polygon(0 10%, 100% 10%, 90% 94%, 10% 94%); }
       .tailgate .part-dot { left: calc(50% - 4px); top: 8%; }
       .tailgate .part-label { left: 50%; top: 0; transform: translate(-50%, -95%); }
-      .center-badge {
-        position: absolute;
-        z-index: 4;
-        left: 50%;
-        top: 68%;
+      .vehicle-summary {
+        min-height: 30px;
+        margin-top: -7px;
+        border-radius: 15px;
+        padding: 0 11px;
         display: flex;
         align-items: center;
+        justify-content: center;
         gap: 5px;
-        padding: 6px 8px;
-        border: 1px solid rgba(255,255,255,.24);
-        border-radius: 9px;
-        transform: translate(-50%, -50%);
-        background: rgba(16,18,21,.79);
-        box-shadow: 0 5px 16px rgba(0,0,0,.2);
-        color: #fff;
-        backdrop-filter: blur(8px);
-        font-size: 9px;
+        background: var(--voc-surface);
+        border: 1px solid var(--voc-line-soft);
+        color: var(--voc-secondary);
+        font-size: 10px;
         white-space: nowrap;
-        pointer-events: none;
       }
-      .center-badge ha-icon { --mdc-icon-size: 13px; color: #74c69a; }
-      .center-badge.warning ha-icon { color: #ff766b; }
+      .vehicle-summary ha-icon { --mdc-icon-size: 14px; color: var(--voc-success); }
+      .vehicle-summary.warning { background: color-mix(in srgb, var(--voc-warning) 10%, var(--voc-bg)); color: var(--voc-danger); }
+      .vehicle-summary.warning ha-icon { color: var(--voc-danger); }
       .state-panel {
         align-self: center;
         min-width: 0;
-        border-block: 1px solid var(--voc-line);
+        border-top: 1px solid var(--voc-line);
       }
+      .state-heading {
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border-bottom: 1px solid var(--voc-line);
+      }
+      .state-heading > span { font-size: 11px; font-weight: 600; }
+      .state-heading small { font-size: 9px; }
+      .state-heading small.ok { color: var(--voc-success); }
+      .state-heading small.warn { color: var(--voc-danger); }
+      .state-heading small::before { display: inline-block; width: 5px; height: 5px; margin-right: 4px; border-radius: 50%; background: currentColor; content: ""; vertical-align: 1px; }
       .state-row {
         width: 100%;
-        min-height: 38px;
+        min-height: 40px;
         border: 0;
         border-bottom: 1px solid var(--voc-line);
         padding: 8px 0;
         display: flex;
         justify-content: space-between;
+        align-items: center;
         gap: 10px;
         background: transparent;
         color: var(--voc-secondary);
         cursor: pointer;
-        font-size: 11px;
+        font-size: 10px;
+        transition: background-color .16s ease, color .16s ease;
       }
+      .row-label { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+      .row-label ha-icon { --mdc-icon-size: 14px; color: var(--voc-secondary); }
       .state-row strong {
         overflow: hidden;
         color: var(--voc-text);
-        font-weight: 500;
+        font-size: 10px;
+        font-weight: 600;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .state-row.warn strong { color: var(--voc-warning); }
-      .state-row.charge strong { color: var(--voc-blue); }
+      .state-row.warn strong { color: var(--voc-danger); }
+      .state-row.warn .row-label ha-icon { color: var(--voc-danger); }
+      .state-row.charge strong { color: var(--voc-accent); }
+      .state-row.charge .row-label ha-icon { color: var(--voc-accent); }
       .state-row.missing { opacity: .45; cursor: default; }
-      .open-list { padding: 11px 0 10px; }
-      .open-list > span { display: block; margin-bottom: 7px; color: var(--voc-secondary); font-size: 10px; }
-      .open-list > div { display: flex; flex-wrap: wrap; gap: 6px; }
+      .open-list { padding: 11px 0 4px; }
+      .open-list > span { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; color: var(--voc-secondary); font-size: 9px; }
+      .open-list > span b { color: var(--voc-text); font-size: 10px; font-weight: 600; }
+      .open-list > span small { color: var(--voc-danger); font-size: 9px; white-space: nowrap; }
+      .open-list > div { display: flex; flex-wrap: wrap; gap: 5px; }
       .open-list button,
       .open-list em {
         border: 0;
         border-radius: 8px;
         padding: 4px 7px;
-        background: color-mix(in srgb, var(--voc-warning) 11%, transparent);
-        color: var(--voc-warning);
+        background: color-mix(in srgb, var(--voc-warning) 14%, var(--voc-bg));
+        color: var(--voc-danger);
         font-size: 10px;
         font-style: normal;
       }
-      .open-list em { background: var(--voc-surface); color: var(--voc-positive); }
-      .statistics { border-top: 1px solid var(--voc-line); padding: 14px 22px 16px; }
+      .open-list em { background: var(--voc-surface); color: var(--voc-success); }
+      .statistics { border-top: 1px solid var(--voc-line); padding: 15px 22px 17px; }
       .section-title {
         display: flex;
         align-items: baseline;
         justify-content: space-between;
         gap: 10px;
-        margin-bottom: 10px;
+        margin-bottom: 11px;
       }
-      .section-title > span { font-size: 13px; font-weight: 500; }
+      .section-title > div { display: flex; align-items: center; gap: 7px; }
+      .section-title > div ha-icon { --mdc-icon-size: 16px; color: var(--voc-secondary); }
+      .section-title > div span { font-size: 12px; font-weight: 600; }
       .section-title small { color: var(--voc-secondary); font-size: 10px; }
-      .trip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      .trip-block {
-        min-width: 0;
-        border-radius: 10px;
-        padding: 11px;
+      .trip-table {
+        overflow: hidden;
+        border: 1px solid var(--voc-line);
+        border-radius: 13px;
         background: var(--voc-surface);
       }
-      .trip-title { display: block; margin-bottom: 9px; color: var(--voc-secondary); font-size: 11px; font-weight: 600; }
-      .trip-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
-      .trip-metrics button {
+      .trip-labels,
+      .trip-row { display: grid; grid-template-columns: 38px repeat(4, minmax(0, 1fr)); align-items: stretch; }
+      .trip-labels { min-height: 29px; align-items: center; color: var(--voc-secondary); font-size: 9px; text-align: center; }
+      .trip-row { min-height: 59px; border-top: 1px solid var(--voc-line); }
+      .trip-title { display: grid; place-items: center; color: var(--voc-secondary); font-size: 10px; letter-spacing: .08em; }
+      .trip-row button {
         min-width: 0;
         border: 0;
-        border-radius: 8px;
-        padding: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        background: var(--voc-bg);
-        color: var(--voc-text);
-        text-align: left;
-        cursor: pointer;
-      }
-      .trip-metrics strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-      .trip-metrics span { color: var(--voc-secondary); font-size: 10px; }
-      .controls-wrap { border-top: 1px solid var(--voc-line); padding: 14px 22px 20px; }
-      .controls { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
-      .control {
-        min-width: 0;
-        min-height: 64px;
-        border: 0;
-        border-radius: 10px;
-        padding: 8px 4px;
+        border-left: 1px solid var(--voc-line);
+        padding: 8px 5px;
         display: flex;
         flex-direction: column;
         align-items: center;
+        justify-content: center;
+        gap: 2px;
+        background: transparent;
+        color: var(--voc-text);
+        text-align: center;
+        cursor: pointer;
+        transition: background-color .16s ease;
+      }
+      .trip-row button strong { width: 100%; overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+      .trip-row button span { width: 100%; overflow: hidden; color: var(--voc-secondary); font-size: 8px; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
+      .trip-na { border-left: 1px solid var(--voc-line); display: grid; place-items: center; color: var(--voc-secondary); font-size: 12px; }
+      .controls-wrap { border-top: 1px solid var(--voc-line); padding: 15px 22px 21px; }
+      .controls { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 7px; }
+      .control {
+        min-width: 0;
+        min-height: 70px;
+        border: 1px solid transparent;
+        border-radius: 12px;
+        padding: 9px 3px 8px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
         gap: 6px;
         background: var(--voc-surface);
         color: var(--voc-secondary);
         cursor: pointer;
-        font-size: 10px;
+        font-size: 9px;
+        box-shadow: 0 6px 14px rgba(0, 0, 0, .025);
+        transition: transform .18s ease, border-color .18s ease, background-color .18s ease, box-shadow .18s ease, color .18s ease;
       }
       .control-icon {
-        width: 30px;
-        height: 30px;
+        width: 34px;
+        height: 34px;
         display: grid;
         place-items: center;
         border-radius: 50%;
         background: var(--voc-bg);
         color: var(--voc-text);
+        box-shadow: inset 0 0 0 1px var(--voc-line-soft);
+        transition: transform .18s ease, background-color .18s ease, color .18s ease;
       }
-      .control-icon ha-icon { --mdc-icon-size: 17px; }
-      .control.active { color: var(--voc-blue); }
+      .control-icon ha-icon { --mdc-icon-size: 18px; }
+      .control.active { border-color: color-mix(in srgb, var(--voc-blue) 28%, transparent); background: color-mix(in srgb, var(--voc-blue) 8%, var(--voc-bg)); color: var(--voc-accent); }
       .control.active .control-icon { background: var(--voc-blue); color: #fff; }
+      .control[data-action="engine_control"].active { border-color: color-mix(in srgb, var(--voc-orange) 35%, transparent); background: color-mix(in srgb, var(--voc-orange) 8%, var(--voc-bg)); color: var(--voc-orange); }
+      .control[data-action="engine_control"].active .control-icon { background: var(--voc-orange); }
       .control:disabled { opacity: .35; cursor: default; }
+      .control.pending:disabled { opacity: .76; }
+      .pending-icon { animation: voc-spin .8s linear infinite; }
+      .animate-in .level-track i { animation: voc-progress-in .55s cubic-bezier(.2, .7, .2, 1) both; }
+      .animate-in .car-canvas img { animation: voc-car-in .55s cubic-bezier(.2, .75, .2, 1) both; }
       .confirm-dialog {
         width: min(88vw, 330px);
         border: 0;
@@ -1071,6 +1121,7 @@ class VolvoCarCard extends HTMLElement {
         color: var(--voc-text);
         text-align: center;
       }
+      .confirm-dialog[open] { animation: voc-dialog-in .2s cubic-bezier(.2, .8, .2, 1) both; }
       .confirm-dialog::backdrop { background: rgba(0,0,0,.48); backdrop-filter: blur(3px); }
       .dialog-icon { width: 46px; height: 46px; margin: 0 auto 13px; border-radius: 50%; display: grid; place-items: center; background: var(--voc-surface); color: var(--voc-blue); }
       .dialog-icon ha-icon { --mdc-icon-size: 23px; }
@@ -1080,32 +1131,77 @@ class VolvoCarCard extends HTMLElement {
       .dialog-actions button { min-height: 42px; border: 0; border-radius: 10px; cursor: pointer; }
       .dialog-cancel { background: var(--voc-surface); color: var(--voc-text); }
       .dialog-confirm { background: var(--voc-blue); color: #fff; }
-      .error { margin: -8px 22px 16px; border-radius: 9px; padding: 8px 10px; background: color-mix(in srgb, var(--voc-warning) 12%, transparent); color: var(--voc-warning); font-size: 11px; }
+      .feedback {
+        position: absolute;
+        z-index: 8;
+        left: 50%;
+        bottom: 14px;
+        min-height: 38px;
+        max-width: calc(100% - 32px);
+        border: 1px solid color-mix(in srgb, var(--voc-positive) 28%, transparent);
+        border-radius: 19px;
+        padding: 0 13px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        transform: translateX(-50%);
+        background: color-mix(in srgb, var(--voc-bg) 90%, var(--voc-positive));
+        box-shadow: 0 10px 26px rgba(0, 0, 0, .18);
+        color: var(--voc-success);
+        font-size: 11px;
+        white-space: nowrap;
+        animation: voc-toast-in .24s cubic-bezier(.2, .8, .2, 1) both;
+      }
+      .feedback[hidden] { display: none; }
+      .feedback ha-icon { --mdc-icon-size: 16px; flex: 0 0 auto; }
+      .feedback span { overflow: hidden; text-overflow: ellipsis; }
+      .feedback.error { border-color: color-mix(in srgb, var(--voc-warning) 30%, transparent); background: color-mix(in srgb, var(--voc-bg) 90%, var(--voc-warning)); color: var(--voc-danger); }
       .setup-card { min-height: 130px; padding: 24px; display: flex; align-items: center; gap: 14px; }
       .setup-card > ha-icon { --mdc-icon-size: 34px; color: var(--voc-blue); }
       .setup-card div { display: flex; flex-direction: column; gap: 4px; }
       .setup-card strong { font-weight: 500; }
       .setup-card span { color: var(--voc-secondary); font-size: 12px; }
       button:focus-visible { outline: 2px solid var(--voc-blue); outline-offset: 2px; }
-      @media (max-width: 620px) {
-        .hero { padding: 18px 16px 12px; }
-        h2 { font-size: 21px; }
-        .connection { display: none; }
-        .lock-pill span { display: none; }
-        .range-band { margin: 0 16px; }
-        .range-tile { min-height: 70px; padding: 12px; }
-        .range-copy strong { font-size: 19px; }
-        .energy-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 16px 8px; }
-        .vehicle-area { grid-template-columns: minmax(0, 1fr) minmax(136px, .8fr); gap: 8px; padding: 8px 16px 16px; }
-        .car-canvas { width: min(100%, 194px); }
-        .trip-grid { grid-template-columns: 1fr; }
-        .controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      @media (hover: hover) {
+        .range-tile:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--voc-blue) 24%, var(--voc-line)); box-shadow: 0 10px 22px rgba(0, 0, 0, .07); }
+        .lock-pill:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 8px 16px rgba(0, 0, 0, .12); }
+        .state-row:not(.missing):hover, .trip-row button:hover { background: color-mix(in srgb, var(--voc-blue) 5%, transparent); }
+        .control:not(:disabled):hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--voc-blue) 20%, var(--voc-line)); box-shadow: 0 10px 20px rgba(0, 0, 0, .08); }
+        .control:not(:disabled):hover .control-icon { transform: scale(1.04); }
       }
-      @media (max-width: 380px) {
-        .range-band { grid-template-columns: 1fr; }
+      .range-tile:active, .lock-pill:not(:disabled):active, .control:not(:disabled):active { transform: scale(.98); }
+      .state-heading small.warn::before, .connection.offline i { animation: voc-status-pulse 1.7s ease-in-out infinite; }
+      @keyframes voc-progress-in { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @keyframes voc-car-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      @keyframes voc-warning-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes voc-spin { to { transform: rotate(360deg); } }
+      @keyframes voc-status-pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; } 50% { opacity: .62; box-shadow: 0 0 0 4px transparent; } }
+      @keyframes voc-dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      @keyframes voc-toast-in { from { opacity: 0; transform: translate(-50%, 8px) scale(.98); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+      @container (max-width: 620px) {
+        .hero { padding: 19px 16px 14px; }
+        h2 { font-size: 24px; }
+        .lock-pill { min-width: 88px; min-height: 44px; padding-inline: 13px; }
+        .range-band { margin: 0 16px; }
+        .range-tile { min-height: 96px; padding: 12px 13px 13px; }
+        .range-tile > strong { font-size: 22px; }
+        .vehicle-area { grid-template-columns: minmax(0, 1.05fr) minmax(132px, .95fr); gap: 12px; margin: 14px 16px 17px; padding: 14px 13px 15px; }
+        .car-canvas { width: min(100%, 188px); }
+        .statistics, .controls-wrap { padding-inline: 16px; }
+        .controls { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      }
+      @container (max-width: 350px) {
+        .lock-pill { min-width: 44px; width: 44px; padding: 0; }
+        .lock-pill span { display: none; }
+        .hero-meta { gap: 7px; }
         .vehicle-area { grid-template-columns: 1fr; }
-        .car-canvas { width: 186px; }
+        .car-canvas { width: 188px; }
         .state-panel { width: 100%; }
+        .trip-labels, .trip-row { grid-template-columns: 32px repeat(4, minmax(0, 1fr)); }
+        .trip-row button strong { font-size: 10px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
       }
     </style>`;
   }
@@ -1119,10 +1215,10 @@ window.customCards = window.customCards || [];
 if (!window.customCards.some((card) => card.type === "volvo-car-card")) {
   window.customCards.push({
     type: "volvo-car-card",
-    name: "Volvo 原生风格统计卡",
-    description: "移动端优先的车辆状态、双能源续航、TM/TA 行程统计与远程控制卡。",
+    name: "Volvo 原生车辆控制卡",
+    description: "内置黑色 S90/XC60/XC90 车模的车辆状态、双能源续航、TM/TA 与远程控制卡。",
     preview: true,
-    documentationURL: "https://github.com/idreamshen/hass-volvooncall-cn",
+    documentationURL: "https://github.com/Annincikee/hass-volvooncall-cn",
     getEntitySuggestion: (_hass, entityId) => {
       const match = entityId.match(
         /^(?:lock|sensor|binary_sensor|switch)\.([a-z0-9]+)_(?:lock|engine|climatization|battery_charge_level|full_charge_electric_range|tm_distance|fuel_amount)$/,
