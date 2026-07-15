@@ -17,7 +17,7 @@
         "grpcio>=1.67.1",
         "grpcio-tools>=1.67.1"
     ],
-    "version": "3.0.2",
+    "version": "3.1.0",
     "loggers": [
         "volvooncall_cn"
     ]
