@@ -24,6 +24,7 @@ async def async_setup_entry(
         buttons.append(VolvoFlashButton(coordinator, idx, "flash_button"))
         buttons.append(VolvoHonkFlashButton(coordinator, idx, "honk_flash_button"))
         buttons.append(VolvoHonkButton(coordinator, idx, "honk_button"))
+        buttons.append(VolvoSignInButton(coordinator, idx, "app_sign_in_button"))
 
     async_add_entities(buttons)
 
@@ -56,3 +57,13 @@ class VolvoHonkButton(VolvoEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         await self.coordinator.data[self.idx].honk()
+
+
+class VolvoSignInButton(VolvoEntity, ButtonEntity):
+    """Representation of a Volvo Cars button."""
+
+    def __init__(self, coordinator, idx, metaMapKey):
+        super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
+
+    async def async_press(self) -> None:
+        await self.coordinator.data[self.idx].sign_in()
