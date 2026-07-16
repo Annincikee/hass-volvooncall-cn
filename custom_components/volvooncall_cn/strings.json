@@ -160,6 +160,9 @@
         "number": {
             "engine_duration_number": {
                 "name": "{nickname} Engine Duration"
+            },
+            "charge_limit_number": {
+                "name": "{nickname} Charge Limit"
             }
         },
         "lock": {
