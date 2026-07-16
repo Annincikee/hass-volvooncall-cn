@@ -10,8 +10,8 @@
         "http",
         "lovelace"
     ],
-    "issue_tracker": "https://github.com/idreamshen/hass-volvooncall-cn/issues",
-    "documentation": "https://github.com/idreamshen/hass-volvooncall-cn",
+    "issue_tracker": "https://github.com/Annincikee/hass-volvooncall-cn/issues",
+    "documentation": "https://github.com/Annincikee/hass-volvooncall-cn",
     "iot_class": "cloud_polling",
     "requirements": [
         "grpcio>=1.67.1",

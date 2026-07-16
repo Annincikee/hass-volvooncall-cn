@@ -37,6 +37,10 @@ MAX_RETRIES = 3
 DEFAULT_SCAN_INTERVAL = 30
 MIN_SCAN_INTERVAL = 30
 
+# The pile list carries the live order id, so it must not outlive a poll cycle.
+CHARGE_PILE_CACHE_TTL = 15
+CHARGE_ORDER_CACHE_TTL = 30 * 60
+
 
 class VolvoAPIError(Exception):
     def __init__(self, message):
@@ -44,7 +48,7 @@ class VolvoAPIError(Exception):
 
 
 def redact_sensitive(value):
-    """Return a log-safe string without bearer or refresh tokens."""
+    """Return a log-safe string without credentials or vehicle identifiers."""
     text = str(value)
     text = re.sub(r"(refreshToken=)[^&\s'\"]+", r"\1<redacted>", text)
     text = re.sub(
@@ -55,6 +59,19 @@ def redact_sensitive(value):
     )
     text = re.sub(
         r"(X-Token['\"]?\s*[:=]\s*['\"]?)[^,'\"\s]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"((?:phone|phoneNumber|vin|vinCode)=)[^&\s'\"]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"((?:phone|phoneNumber|vin|vinCode)['\"]?\s*[:=]\s*['\"]?)"
+        r"[^,'\"\s]+",
         r"\1<redacted>",
         text,
         flags=re.IGNORECASE,
@@ -73,11 +90,13 @@ class VehicleBaseAPI:
         self._digitalvolvo_x_token = ""
         self._vocapi_access_token = ""
         self._access_token_expire_at = 0
-        self._charge_piles_cache = None
-        self._charge_piles_cache_expire_at = 0
+        self._charge_piles_cache = {}
+        self._charge_order_cache = {}
 
-    async def _request_digitalvolvo(self, method, url, headers, **kwargs):
-        for i in range(MAX_RETRIES):
+    async def _request_digitalvolvo(
+        self, method, url, headers, *, max_attempts=MAX_RETRIES, **kwargs
+    ):
+        for i in range(max_attempts):
             try:
                 final_headers = {}
                 for k in DIGITALVOLVO_HEADERS:
@@ -113,13 +132,16 @@ class VehicleBaseAPI:
                         raise VolvoAPIError(res.get("errMsg") or res.get("msg"))
 
                     return res
+            except VolvoAPIError:
+                # Business rejections are deterministic and must not be replayed.
+                raise
             except Exception as error:
                 _LOGGER.warning(
                     "Failure when communicating with the server: %s",
                     redact_sensitive(error),
                     exc_info=True,
                 )
-                if i < MAX_RETRIES - 1:  # Don't delay on last attempt
+                if i < max_attempts - 1:  # Don't delay on last attempt
                     await asyncio.sleep(2**i)  # Exponential backoff
                 else:
                     raise
@@ -128,14 +150,26 @@ class VehicleBaseAPI:
         """Perform a query to the online service."""
         return await self._request_digitalvolvo(METH_GET, url, headers)
 
-    async def digitalvolvo_post(self, url, headers, data):
+    async def digitalvolvo_post(
+        self, url, headers, data, *, max_attempts=MAX_RETRIES
+    ):
         """Perform a query to the online service."""
-        return await self._request_digitalvolvo(METH_POST, url, headers, json=data)
+        return await self._request_digitalvolvo(
+            METH_POST,
+            url,
+            headers,
+            max_attempts=max_attempts,
+            json=data,
+        )
 
     async def login(self):
         now = int(time.time())
 
-        if (self._access_token_expire_at - now) >= 60 * 10:
+        # A live session is kept fresh by update_token() using the refresh
+        # token. Only fall back to a full password login when there is no
+        # usable session to refresh (first auth, or a fully expired token
+        # whose refresh token is assumed dead as well).
+        if self._refresh_token and (self._access_token_expire_at - now) > 0:
             return
 
         url = urljoin(DIGITALVOLVO_URL, "/app/iam/api/v1/auth")
@@ -169,17 +203,35 @@ class VehicleBaseAPI:
     async def update_token(self):
         now = int(time.time())
 
-        if (self._access_token_expire_at - now) >= 60 * 2:
+        # No session yet (first poll, or a prior refresh cleared it) — a full
+        # password login is the only way to establish one.
+        if not self._refresh_token:
+            await self.login()
+            return
+
+        # Access token still has comfortable headroom; nothing to refresh.
+        if (self._access_token_expire_at - now) >= 60 * 10:
             return
 
         url = urljoin(DIGITALVOLVO_URL, "/app/iam/api/v1/refreshToken?refreshToken=" + self._refresh_token)
 
-        result = await self.digitalvolvo_get(url, {})
-        self._refresh_token = result["data"]["refreshToken"]
-        self._vocapi_access_token = result["data"]["globalAccessToken"]
-        self._digitalvolvo_access_token = result["data"]["accessToken"]
-        self._digitalvolvo_x_token = result["data"]["jwtToken"]
-        self._access_token_expire_at = now + int(result["data"]["expiresIn"])
+        try:
+            result = await self.digitalvolvo_get(url, {})
+            self._refresh_token = result["data"]["refreshToken"]
+            self._vocapi_access_token = result["data"]["globalAccessToken"]
+            self._digitalvolvo_access_token = result["data"]["accessToken"]
+            self._digitalvolvo_x_token = result["data"]["jwtToken"]
+            self._access_token_expire_at = now + int(result["data"]["expiresIn"])
+        except Exception as err:
+            # The refresh token has itself expired or been revoked; drop it and
+            # recover with a full password login.
+            _LOGGER.warning(
+                "Token refresh failed, re-authenticating with password: %s",
+                redact_sensitive(err),
+            )
+            self._refresh_token = ""
+            self._access_token_expire_at = 0
+            await self.login()
 
     async def get_vehicles(self):
         url = urljoin(DIGITALVOLVO_URL, "/app/account/vehicles/api/v1/owner/listBindCar")
@@ -200,36 +252,78 @@ class VehicleBaseAPI:
 
         return vins
 
-    async def get_charge_piles(self):
-        """Return the home charging piles linked to the current account."""
-        now = time.time()
-        if (
-            self._charge_piles_cache is not None
-            and now < self._charge_piles_cache_expire_at
-        ):
-            return self._charge_piles_cache
+    def _invalidate_charge_piles(self, vin=None):
+        """Drop cached pile entries so the next read re-fetches the order id."""
+        self._charge_piles_cache.pop(vin or "", None)
 
-        phone = urllib.parse.quote(self._username, safe="")
+    def _invalidate_charge_orders(self, connector_id=None):
+        """Drop cached order history so a just-ended session shows up at once."""
+        if connector_id:
+            self._charge_order_cache.pop(connector_id, None)
+        else:
+            self._charge_order_cache.clear()
+
+    async def get_charge_piles(
+        self, vin=None, series_code=None, *, force_refresh=False
+    ):
+        """Return the home charging piles linked to the current account.
+
+        The app always scopes this to a VIN, and the returned pile carries the
+        active order (tradeNo) that charging telemetry is keyed on.
+        """
+        key = vin or ""
+        now = time.time()
+        cached = self._charge_piles_cache.get(key)
+        if not force_refresh and cached and now < cached[1]:
+            return cached[0]
+
+        query = {"phone": self._username}
+        if vin:
+            query["vin"] = vin
+        if series_code:
+            query["seriesCode"] = series_code
         url = urljoin(
             DIGITALVOLVO_URL,
-            f"/app/charge-pile/api/v1/api/brandPile/getPileList?phone={phone}",
+            "/app/charge-pile/api/v1/api/brandPile/getPileList?"
+            + urllib.parse.urlencode(query),
         )
         result = await self.digitalvolvo_get(url, {})
         piles = result.get("data", {}).get("brandPileList", []) if result else []
 
-        self._charge_piles_cache = piles
-        self._charge_piles_cache_expire_at = now + 5 * 60
+        self._charge_piles_cache[key] = (piles, now + CHARGE_PILE_CACHE_TTL)
         return piles
 
-    async def get_charge_pile_status(self, vin):
-        """Return charging telemetry from the linked home pile."""
-        piles = await self.get_charge_piles()
+    async def get_active_trade_no(
+        self, vin, series_code=None, *, force_refresh=False
+    ):
+        """Return the order id of the pile's running session, if any."""
+        piles = await self.get_charge_piles(
+            vin, series_code, force_refresh=force_refresh
+        )
+        return next(
+            (pile.get("tradeNo") for pile in piles if pile.get("tradeNo")),
+            None,
+        )
+
+    async def get_charge_pile_status(self, vin, series_code=None):
+        """Return the linked home pile plus telemetry for its running session.
+
+        The status endpoint only answers for a live order, so it is skipped
+        when the pile reports none; the pile entry itself still carries
+        connector state, plug-and-charge and session totals.
+        """
+        piles = await self.get_charge_piles(vin, series_code)
         if not piles:
             return None
 
-        pile = piles[0]
-        connector_id = pile.get("connectorId", "")
-        equipment_id = pile.get("equipmentId", "")
+        pile = next(
+            (item for item in piles if item.get("tradeNo")),
+            piles[0],
+        )
+        trade_no = pile.get("tradeNo")
+        if not trade_no:
+            return {"pile": pile, "status": {}}
+
         url = urljoin(
             DIGITALVOLVO_URL,
             "/app/charge-pile/api/v1/api/brandHomePile/status",
@@ -238,28 +332,30 @@ class VehicleBaseAPI:
             url,
             {},
             {
+                "tradeNo": trade_no,
                 "vinCode": vin,
-                "connectorId": connector_id,
-                "connectorID": connector_id,
-                "equipmentId": equipment_id,
-                "tradeNo": "",
             },
         )
-        if not result or not result.get("data"):
-            return None
-
         return {
             "pile": pile,
-            "status": result["data"],
+            "status": (result.get("data") if result else None) or {},
         }
 
-    async def start_charge_pile(self, vin):
+    async def start_charge_pile(self, vin, series_code=None):
         """Start a charging session on the linked home pile."""
-        piles = await self.get_charge_piles()
+        piles = await self.get_charge_piles(
+            vin, series_code, force_refresh=True
+        )
         if not piles:
             raise VolvoAPIError("No linked charge pile")
+        if any(pile.get("tradeNo") for pile in piles):
+            raise VolvoAPIError("A home-charge session is already active")
 
         pile = piles[0]
+        connector_id = pile.get("connectorId")
+        member_id = pile.get("memberId")
+        if not connector_id or not member_id:
+            raise VolvoAPIError("Charge pile is missing control identifiers")
         url = urljoin(
             DIGITALVOLVO_URL,
             "/app/charge-pile/api/v1/api/brandHomePile/start",
@@ -268,21 +364,42 @@ class VehicleBaseAPI:
             url,
             {},
             {
-                "connectorId": pile.get("connectorId", ""),
+                "connectorId": connector_id,
                 "vinCode": vin,
                 "phone": self._username,
-                "memberId": pile.get("memberId", ""),
+                "memberId": member_id,
             },
+            max_attempts=1,
         )
-        return result.get("data") if result else None
+        self._invalidate_charge_piles(vin)
+        self._invalidate_charge_orders(connector_id)
+        data = result.get("data") if result else None
+        if not data or not data.get("startChargeSeq"):
+            raise VolvoAPIError("Charge start returned no session identifier")
+        return data
 
-    async def stop_charge_pile(self, start_charge_seq):
+    async def stop_charge_pile(
+        self, start_charge_seq, vin=None, series_code=None
+    ):
         """Stop the charging session identified by start_charge_seq."""
-        piles = await self.get_charge_piles()
+        piles = await self.get_charge_piles(vin, series_code)
         if not piles:
             raise VolvoAPIError("No linked charge pile")
 
-        connector_id = piles[0].get("connectorId", "")
+        pile = next(
+            (
+                item
+                for item in piles
+                if item.get("tradeNo") == start_charge_seq
+            ),
+            next(
+                (item for item in piles if item.get("tradeNo")),
+                piles[0],
+            ),
+        )
+        connector_id = pile.get("connectorId")
+        if not start_charge_seq or not connector_id:
+            raise VolvoAPIError("Charge stop is missing control identifiers")
         url = urljoin(
             DIGITALVOLVO_URL,
             "/app/charge-pile/api/v1/api/brandHomePile/stop",
@@ -295,17 +412,29 @@ class VehicleBaseAPI:
                 "connectorID": connector_id,
                 "versions": "1",
             },
+            max_attempts=1,
         )
+        self._invalidate_charge_piles(vin)
+        self._invalidate_charge_orders(connector_id)
         return result.get("data") if result else None
 
-    async def get_charge_order_list(self, connector_id=None):
+    async def get_charge_order_list(
+        self, connector_id=None, vin=None, series_code=None
+    ):
         """Return the charging session history for a linked home pile.
 
         Defaults to the first linked pile when connector_id is omitted.
         """
         if connector_id is None:
-            piles = await self.get_charge_piles()
+            piles = await self.get_charge_piles(vin, series_code)
             connector_id = piles[0].get("connectorId", "") if piles else ""
+        if not connector_id:
+            return []
+
+        now = time.time()
+        cached = self._charge_order_cache.get(connector_id)
+        if cached and now < cached[1]:
+            return cached[0]
         url = urljoin(
             DIGITALVOLVO_URL,
             "/app/charge-pile/api/v1/api/brandHomePile/queryList",
@@ -329,15 +458,26 @@ class VehicleBaseAPI:
                 "mainStatus": None,
             },
         )
-        return (result.get("data") if result else None) or []
+        orders = (result.get("data") if result else None) or []
+        self._charge_order_cache[connector_id] = (
+            orders,
+            now + CHARGE_ORDER_CACHE_TTL,
+        )
+        return orders
 
-    async def set_plug_and_charge(self, enabled: bool):
+    async def set_plug_and_charge(
+        self, enabled: bool, vin=None, series_code=None
+    ):
         """Toggle plug-and-charge (auto start on connect) for the home pile."""
-        piles = await self.get_charge_piles()
+        piles = await self.get_charge_piles(
+            vin, series_code, force_refresh=True
+        )
         if not piles:
             raise VolvoAPIError("No linked charge pile")
 
-        equipment_id = piles[0].get("equipmentId", "")
+        equipment_id = piles[0].get("equipmentId")
+        if not equipment_id:
+            raise VolvoAPIError("Charge pile is missing its equipment id")
         url = urljoin(DIGITALVOLVO_URL, "/app/charge-pile/plugAndCharge")
         result = await self.digitalvolvo_post(
             url,
@@ -347,12 +487,12 @@ class VehicleBaseAPI:
                 "equipmentIdList": [equipment_id],
             },
         )
-        self._charge_piles_cache_expire_at = 0
+        self._invalidate_charge_piles(vin)
         return result
 
-    async def sign_in(self):
+    async def sign_in(self, vin=None, series_code=None):
         """Perform the app's daily member check-in (App 签到)."""
-        piles = await self.get_charge_piles()
+        piles = await self.get_charge_piles(vin, series_code)
         if not piles:
             raise VolvoAPIError("No linked charge-pile; member id unavailable for sign-in")
 

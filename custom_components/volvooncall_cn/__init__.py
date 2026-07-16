@@ -215,6 +215,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
         self.supports_electric = powertrain_type == POWERTRAIN_HYBRID
         self.store_datas = []
         self._last_update_started_at = None
+        self._force_next_refresh = False
         self._update_lock = asyncio.Lock()
         # Connection health tracking
         self._consecutive_failures = 0
@@ -246,8 +247,11 @@ class VolvoCoordinator(DataUpdateCoordinator):
         """Fetch data from API endpoint with retry and caching support."""
         async with self._update_lock:
             now = datetime.now(timezone.utc)
+            force_refresh = self._force_next_refresh
+            self._force_next_refresh = False
             if (
-                self.data is not None
+                not force_refresh
+                and self.data is not None
                 and self._last_update_started_at is not None
                 and self.update_interval is not None
                 and now - self._last_update_started_at < self.update_interval
@@ -278,6 +282,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
                             self.volvo_api,
                             isAaos,
                             supports_electric=self.supports_electric,
+                            series_code=vehicleInfos.get("seriesCode"),
                         )
 
                         # Try to update, but don't fail completely
@@ -327,6 +332,16 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
                 # Only raise if we have no data at all (first load)
                 raise UpdateFailed(f"Error communicating with API: {err}")
+
+    async def async_force_refresh(self):
+        """Refresh immediately after a control command, bypassing throttling."""
+        self._force_next_refresh = True
+        try:
+            await self.async_refresh()
+        finally:
+            # DataUpdateCoordinator can occasionally coalesce refresh calls.
+            # Never let a force flag leak into a later scheduled poll.
+            self._force_next_refresh = False
 
 metaMap = {
     "car_lock": {

@@ -51,7 +51,7 @@ async def test_climatization_control_uses_dedicated_start_and_stop(monkeypatch):
     """Parked climatization must not use the engine remote-start duration path."""
     FakeInvocationStub.calls = []
     monkeypatch.setattr(volvo_module, "InvocationServiceStub", FakeInvocationStub)
-    api = VehicleAPI(MagicMock(), "13800000000", "password")
+    api = VehicleAPI(MagicMock(), "TEST_USERNAME", "password")
     api.channel = object()
 
     await api.climatization_control("TEST_VIN", True)

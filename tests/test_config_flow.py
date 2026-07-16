@@ -336,36 +336,40 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_empty_username(self, hass: HomeAssistant):
-        """Test that empty username is handled."""
+        """Empty username re-renders the form with a field error, not a crash."""
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": config_entries.SOURCE_USER}
         )
-        
-        # Try to submit with empty username
-        with pytest.raises(Exception):  # Should raise validation error
-            result = await hass.config_entries.flow.async_configure(
-                result["flow_id"],
-                user_input={
-                    CONF_USERNAME: "",
-                    CONF_PASSWORD: TEST_PASSWORD,
-                }
-            )
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_USERNAME: "",
+                CONF_PASSWORD: TEST_PASSWORD,
+            }
+        )
+
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["step_id"] == "user"
+        assert result["errors"]["base"] == "missing_credentials"
 
     @pytest.mark.asyncio
     async def test_empty_password(self, hass: HomeAssistant):
-        """Test that empty password is handled."""
+        """Empty password re-renders the form with a field error, not a crash."""
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": config_entries.SOURCE_USER}
         )
-        
-        # Try to submit with empty password
-        with pytest.raises(Exception):  # Should raise validation error
-            result = await hass.config_entries.flow.async_configure(
-                result["flow_id"],
-                user_input={
-                    CONF_USERNAME: TEST_USERNAME,
-                    CONF_PASSWORD: "",
-                }
-            )
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: "",
+            }
+        )
+
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["step_id"] == "user"
+        assert result["errors"]["base"] == "missing_credentials"

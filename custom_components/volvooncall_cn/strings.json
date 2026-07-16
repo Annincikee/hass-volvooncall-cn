@@ -10,6 +10,10 @@
                     "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)"
                 }
             }
+        },
+        "error": {
+            "missing_credentials": "Username and password are both required.",
+            "unknown": "Unexpected error, please try again."
         }
     },
     "options": {
@@ -131,6 +135,12 @@
             },
             "sunroof_switch": {
                 "name": "{nickname} Sunroof control"
+            },
+            "home_charge_switch": {
+                "name": "{nickname} Home charging"
+            },
+            "plug_and_charge_switch": {
+                "name": "{nickname} Plug and charge"
             }
         },
         "button": {
@@ -142,6 +152,9 @@
             },
             "honk_button": {
                 "name": "{nickname} Honk"
+            },
+            "app_sign_in_button": {
+                "name": "{nickname} App daily check-in"
             }
         },
         "number": {
