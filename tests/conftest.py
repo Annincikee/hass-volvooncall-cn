@@ -259,7 +259,7 @@ def mock_aiohttp_session():
 # Test Constants
 # ============================================================================
 
-TEST_USERNAME = "13800138000"
+TEST_USERNAME = "TEST_USERNAME"
 TEST_PASSWORD = "test_password"
 TEST_VIN = "TEST_VIN_12345678"
 TEST_SCAN_INTERVAL = 60

@@ -23,13 +23,14 @@ async def test_parse_battery_from_grpc():
                 averageEnergyConsumptionKwhPer100Km=18.4,
                 estimatedDistanceToEmptyKm=54,
                 estimatedChargingTimeToFullMinutes=42,
-                chargerConnectionStatus=2,
+                chargerConnectionStatus=1,
                 chargingStatus=1,
                 chargingPowerWatts=3680,
             ),
         )
     )
     api.get_charge_pile_status = AsyncMock(return_value=None)
+    api.get_charge_order_list = AsyncMock(return_value=[])
     vehicle = Vehicle("TEST_VIN", api, True)
 
     await vehicle._parse_battery()
@@ -42,7 +43,26 @@ async def test_parse_battery_from_grpc():
     assert vehicle.estimated_charging_time == 42
     assert vehicle.charging_power == 3.68
     assert vehicle.charge_data_source == "grpc_battery"
-    api.get_charge_pile_status.assert_awaited_once_with("TEST_VIN")
+    api.get_charge_pile_status.assert_awaited_once_with("TEST_VIN", None)
+
+
+@pytest.mark.asyncio
+async def test_parse_battery_reports_disconnected_connector():
+    """BatteryService status 2 means that the charger is not connected."""
+    api = MagicMock()
+    api.get_battery_status = AsyncMock(
+        return_value=GetBatteryResponse(
+            vin="TEST_VIN",
+            battery=Battery(chargerConnectionStatus=2),
+        )
+    )
+    api.get_charge_pile_status = AsyncMock(return_value=None)
+    api.get_charge_order_list = AsyncMock(return_value=[])
+    vehicle = Vehicle("TEST_VIN", api, True)
+
+    await vehicle._parse_battery()
+
+    assert vehicle.charger_connection_status == "disconnected"
 
 
 @pytest.mark.asyncio
@@ -66,6 +86,7 @@ async def test_charge_pile_never_supplies_vehicle_battery_or_range():
             },
         }
     )
+    api.get_charge_order_list = AsyncMock(return_value=[])
     vehicle = Vehicle("TEST_VIN", api, True)
 
     await vehicle._parse_battery()
@@ -107,6 +128,7 @@ async def test_charge_pile_cannot_override_battery_service_values():
             },
         }
     )
+    api.get_charge_order_list = AsyncMock(return_value=[])
     vehicle = Vehicle("TEST_VIN", api, True)
 
     await vehicle._parse_battery()
@@ -115,3 +137,40 @@ async def test_charge_pile_cannot_override_battery_service_values():
     assert vehicle.electric_range == 54
     assert vehicle.tm_energy_consumption == 18.4
     assert vehicle.charge_data_source == "grpc_battery+charge_pile_api"
+
+
+@pytest.mark.asyncio
+async def test_battery_failure_clears_vehicle_values_and_marks_degraded():
+    """Pile availability must not hide a BatteryService failure."""
+    api = MagicMock()
+    api.get_battery_status = AsyncMock(
+        return_value=GetBatteryResponse(
+            vin="TEST_VIN",
+            battery=Battery(
+                batteryChargeLevelPercentage=76.5,
+                estimatedDistanceToEmptyKm=54,
+            ),
+        )
+    )
+    api.get_charge_pile_status = AsyncMock(
+        return_value={
+            "pile": {
+                "equipmentName": "Test Home Charger",
+                "connectorStatus": 2,
+                "plugAndChargeEnabled": 0,
+            },
+            "status": {},
+        }
+    )
+    api.get_charge_order_list = AsyncMock(return_value=[])
+    vehicle = Vehicle("TEST_VIN", api, True)
+
+    await vehicle._parse_battery()
+    api.get_battery_status.side_effect = RuntimeError("UNAVAILABLE")
+    await vehicle._parse_battery()
+
+    assert vehicle.battery_charge_level_percentage is None
+    assert vehicle.electric_range is None
+    assert vehicle._data_source_status["battery"] is False
+    assert vehicle._data_source_status["charge_pile"] is True
+    assert vehicle.connection_status == "Degraded (1 sources failed)"

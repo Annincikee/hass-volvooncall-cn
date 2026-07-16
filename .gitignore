@@ -13,3 +13,8 @@ htmlcov/
 
 # Local-only artifacts
 .DS_Store
+*.har
+*.pcap
+*.pcapng
+*_digitalvolvo.com_message.txt
+*_volvocars.com.cn_message.txt

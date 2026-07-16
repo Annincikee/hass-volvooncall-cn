@@ -60,8 +60,11 @@ BATTERY_CHARGING_STATUS = {
 }
 BATTERY_CONNECTION_STATUS = {
     0: "unknown",
-    1: "disconnected",
-    2: "connected_ac",
+    # BatteryService reports 1 while the vehicle is connected to AC power and
+    # 2 after the connector is removed.  Do not confuse this with the home
+    # pile's connectorStatus enum below, which uses different values.
+    1: "connected_ac",
+    2: "disconnected",
     3: "connected_dc",
 }
 PILE_CONNECTION_STATUS = {
@@ -69,13 +72,16 @@ PILE_CONNECTION_STATUS = {
     1: "idle",
     2: "plugged_in",
     3: "charging",
-    4: "fault",
+    4: "reserved",
+    255: "fault",
 }
+# startChargeSeqStat as reported by brandHomePile/status.
 PILE_CHARGING_STATUS = {
     0: "not_started",
-    1: "charging",
-    2: "completed",
-    3: "aborted",
+    1: "starting",
+    2: "charging",
+    3: "stopping",
+    4: "completed",
 }
 
 
@@ -106,19 +112,21 @@ class VehicleAPI(VehicleBaseAPI):
 
     async def get_channel(self):
         if self.channel:
-            return
+            return self.channel
 
         async with self._channel_lock:
             if not self.channel:
                 self.channel = await self.gen_channel(GRPC_DIGITALVOLVO_HOST)
+        return self.channel
 
     async def get_lbs_channel(self):
         if self.lbs_channel:
-            return
+            return self.lbs_channel
 
         async with self._lbs_channel_lock:
             if not self.lbs_channel:
                 self.lbs_channel = await self.gen_channel(GRPC_LBS_VOLVO_HOST)
+        return self.lbs_channel
 
     def raise_invocation_fail(self, status):
         if status in [invocationStatus.SUCCESS, invocationStatus.SENT, invocationStatus.DELIVERED]:
@@ -139,7 +147,7 @@ class VehicleAPI(VehicleBaseAPI):
             raise Exception("未知错误")
 
     async def get_fuel_status(self, vin) -> GetFuelResp:
-        stub = FuelServiceStub(self.channel)
+        stub = FuelServiceStub(await self.get_channel())
         req = GetFuelReq(vin=vin)
         metadata: list = [("vin", vin)]
         res = GetFuelResp()
@@ -148,7 +156,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def get_exterior(self, vin) -> GetExteriorResp:
-        stub = ExteriorServiceStub(self.channel)
+        stub = ExteriorServiceStub(await self.get_channel())
         req = GetExteriorReq(vin=vin)
         metadata: list = [("vin", vin)]
         res = GetExteriorResp()
@@ -157,7 +165,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def get_health(self, vin) -> GetHealthResp:
-        stub = HealthServiceStub(self.channel)
+        stub = HealthServiceStub(await self.get_channel())
         req = GetHealthReq(vin=vin)
         metadata: list = [("vin", vin)]
         res = GetHealthResp()
@@ -168,7 +176,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def get_odometer(self, vin) -> GetOdometerResp:
-        stub = OdometerServiceStub(self.channel)
+        stub = OdometerServiceStub(await self.get_channel())
         req = GetOdometerReq(vin=vin)
         metadata: list = [("vin", vin)]
         res = GetOdometerResp()
@@ -177,7 +185,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def get_availability(self, vin) -> GetAvailabilityResp:
-        stub = AvailabilityServiceStub(self.channel)
+        stub = AvailabilityServiceStub(await self.get_channel())
         req = GetAvailabilityReq(vin=vin)
         metadata: list = [("vin", vin)]
         res = GetAvailabilityResp()
@@ -186,7 +194,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def window_control(self, vin, opentype):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = windowControlReq(head=req_header, openType=opentype)
         metadata: list = [("vin", vin)]
@@ -198,8 +206,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def get_location(self, vin) -> StreamLastKnownLocationsResp:
-        await self.get_lbs_channel()
-        stub = DtlInternetServiceStub(self.lbs_channel)
+        stub = DtlInternetServiceStub(await self.get_lbs_channel())
         req = StreamLastKnownLocationsReq(vin=vin)
         metadata: list = [("vin", vin)]
         res: StreamLastKnownLocationsResp = StreamLastKnownLocationsResp()
@@ -208,7 +215,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def engine_control(self, vin, isStart: bool, duration: int):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = EngineStartReq()
         if isStart:
@@ -225,7 +232,7 @@ class VehicleAPI(VehicleBaseAPI):
 
     async def climatization_control(self, vin: str, is_start: bool):
         """Start or stop parked climatization without starting the engine."""
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         metadata: list = [("vin", vin)]
 
@@ -250,7 +257,7 @@ class VehicleAPI(VehicleBaseAPI):
             break
 
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = HonkFlashReq(head=req_header, honkFlashType=honk_flash_type)
         metadata: list = [("vin", vin)]
@@ -262,7 +269,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def door_lock(self, vin):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = LockReq(head=req_header, lockType=LockType.LOCK_REDUCED_GUARD)
         metadata: list = [("vin", vin)]
@@ -274,7 +281,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def door_unlock(self, vin, unlockType):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = UnlockReq(head=req_header)
         if unlockType != UnlockType.UNLOCK_UNSPECIFIED:
@@ -288,7 +295,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def get_engine_status(self, vin):
-        stub = EngineRemoteStartServiceStub(self.channel)
+        stub = EngineRemoteStartServiceStub(await self.get_channel())
         req = GetEngineRemoteStartReq(vin=vin)
         metadata: list = [("vin", vin)]
         res: GetEngineRemoteStartResp = GetEngineRemoteStartResp()
@@ -298,7 +305,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def sunroof_contorl(self, vin: str, controlType: invocationControlType):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = SunroofControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
@@ -310,7 +317,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def tailgate_contorl(self, vin: str, controlType: invocationControlType):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = TailgateControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
@@ -322,7 +329,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def update_status(self, vin: str):
-        stub = InvocationServiceStub(self.channel)
+        stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = UpdateStatusReq(head=req_header)
         metadata: list = [("vin", vin)]
@@ -335,7 +342,7 @@ class VehicleAPI(VehicleBaseAPI):
         return
 
     async def get_car_preferences(self, vin: str):
-        stub = CarPreferencesStub(self.channel)
+        stub = CarPreferencesStub(await self.get_channel())
         req = GetPreferencesReq(vin=vin)
         metadata: list = [("vin", vin)]
         res: GetPreferencesResp = GetPreferencesResp()
@@ -346,7 +353,7 @@ class VehicleAPI(VehicleBaseAPI):
 
     async def get_battery_status(self, vin: str) -> GetBatteryResponse:
         """Fetch PHEV/BEV battery and charging status."""
-        stub = BatteryServiceStub(self.channel)
+        stub = BatteryServiceStub(await self.get_channel())
         req = GetBatteryRequest(vin=vin)
         metadata: list = [("vin", vin)]
         res: GetBatteryResponse = GetBatteryResponse()
@@ -355,7 +362,7 @@ class VehicleAPI(VehicleBaseAPI):
         return res
 
     async def update_car_preference(self, vin: str, nickname: str):
-        stub = CarPreferencesStub(self.channel)
+        stub = CarPreferencesStub(await self.get_channel())
         preference = Preference(nickName=nickname)
         req = UpdatePreferencesReq(vin=vin, preference=preference)
         metadata: list = [("vin", vin)]
@@ -367,11 +374,19 @@ class VehicleAPI(VehicleBaseAPI):
 
 
 class Vehicle(object):
-    def __init__(self, vin, api, isAaos, supports_electric=True):
+    def __init__(
+        self,
+        vin,
+        api,
+        isAaos,
+        supports_electric=True,
+        series_code=None,
+    ):
         self.vin = vin
         self._api = api
         self.isAaos = isAaos
         self.supports_electric = supports_electric
+        self.series_code = series_code
 
         self.series_name = ""
         self.model_name = ""
@@ -414,6 +429,8 @@ class Vehicle(object):
         self.charging_current = None
         self.charging_session_energy = None
         self.charge_trade_no = None
+        self.home_charge_status = None
+        self.has_home_charge_pile = False
         self.plug_and_charge_enabled = None
         self.last_charge_order = None
         self.charge_data_source = None
@@ -462,6 +479,7 @@ class Vehicle(object):
         }
         if self.supports_electric:
             self._data_source_status["battery"] = True
+            self._data_source_status["charge_pile"] = True
 
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
@@ -505,11 +523,16 @@ class Vehicle(object):
     @property
     def connection_status(self) -> str:
         """Return connection status for diagnostic sensor."""
+        failed_sources = [
+            key for key, available in self._data_source_status.items()
+            if not available
+        ]
+        if failed_sources:
+            return f"Degraded ({len(failed_sources)} sources failed)"
         if self._consecutive_failures == 0:
             return "Connected"
         elif self._consecutive_failures < 3:
-            failed_sources = [k for k, v in self._data_source_status.items() if not v]
-            return f"Degraded ({len(failed_sources)} sources failed)"
+            return "Degraded"
         else:
             return f"Disconnected ({self._consecutive_failures} failures)"
     
@@ -632,7 +655,27 @@ class Vehicle(object):
 
     async def _parse_battery(self):
         """Collect vehicle battery and home-pile data without mixing sources."""
-        data = {}
+        # Build a complete snapshot on every poll so ended or failed sessions
+        # cannot leave stale current, voltage, order or battery values behind.
+        data = {
+            "battery_charge_level_percentage": None,
+            "electric_range": None,
+            "tm_energy_consumption": None,
+            "battery_charging_status": None,
+            "charger_connection_status": None,
+            "estimated_charging_time": None,
+            "charging_power": None,
+            "charging_voltage": None,
+            "charging_current": None,
+            "charging_session_energy": None,
+            "charge_trade_no": None,
+            "home_charge_status": None,
+            "has_home_charge_pile": False,
+            "plug_and_charge_enabled": None,
+            "charge_data_source": None,
+            "charge_pile_name": None,
+            "charge_pile_address": None,
+        }
         battery_ok = False
         pile_ok = False
 
@@ -678,56 +721,103 @@ class Vehicle(object):
             )
 
         try:
-            payload = await self._api.get_charge_pile_status(self.vin)
-            if not payload:
-                raise ValueError("No linked charge-pile data")
-
-            pile = payload["pile"]
-            status = payload["status"]
-            connector_status = _to_int(status.get("connectorStatus"))
-            charging_status = _to_int(status.get("startChargeSeqStat"))
-            charging_power = _to_float(status.get("power"))
-            is_charging = (
-                connector_status == 3
-                or charging_status == 1
-                or (charging_power is not None and charging_power > 0)
+            payload = await self._api.get_charge_pile_status(
+                self.vin, self.series_code
             )
-            data.update({
-                "battery_charging_status": (
-                    "charging"
-                    if is_charging
-                    else PILE_CHARGING_STATUS.get(charging_status, "unknown")
-                ),
-                "charger_connection_status": PILE_CONNECTION_STATUS.get(
-                    connector_status, "unknown"
-                ),
-                "estimated_charging_time": _to_int(
-                    status.get("estimatedChargingTime")
-                ),
-                "charging_power": charging_power,
-                "charging_voltage": _to_float(status.get("voltageA")),
-                "charging_current": _to_float(status.get("currentA")),
-                "charging_session_energy": _to_float(status.get("totalPower")),
-                "charge_trade_no": (
-                    status.get("startChargeSeq") or self.charge_trade_no
-                ),
-                "plug_and_charge_enabled": bool(
-                    _to_int(pile.get("plugAndChargeEnabled"))
-                ),
-                "charge_data_source": (
-                    "grpc_battery+charge_pile_api"
-                    if battery_ok
-                    else "charge_pile_api"
-                ),
-                "charge_pile_name": (
-                    pile.get("equipmentName") or pile.get("equipmentUserName")
-                ),
-                "charge_pile_address": pile.get("address"),
-            })
-            pile_ok = True
+            if payload is None:
+                # A successful empty list means this account has no linked
+                # home pile; that is a valid configuration, not an API error.
+                pile_ok = True
+            else:
+                pile = payload["pile"]
+                status = payload["status"]
+                # Only a running session has telemetry; otherwise the pile entry
+                # itself is the only source of connector state.
+                connector_status = _to_int(status.get("connectorStatus"))
+                if connector_status is None:
+                    connector_status = _to_int(pile.get("connectorStatus"))
+                charging_status = _to_int(status.get("startChargeSeqStat"))
+                charging_power = _to_float(status.get("power"))
+                trade_no = pile.get("tradeNo") or status.get("startChargeSeq")
+                is_charging = (
+                    connector_status == 3
+                    or charging_status in (1, 2)
+                    or (charging_power is not None and charging_power > 0)
+                )
+
+                if charging_status is not None:
+                    home_charge_status = PILE_CHARGING_STATUS.get(
+                        charging_status, "unknown"
+                    )
+                elif is_charging:
+                    home_charge_status = "charging"
+                elif connector_status in (1, 2):
+                    home_charge_status = "idle"
+                else:
+                    home_charge_status = "unknown"
+
+                charging_state = (
+                    "charging" if is_charging else home_charge_status
+                )
+                active_trade_no = (
+                    trade_no
+                    if home_charge_status
+                    in {"starting", "charging", "stopping"}
+                    else None
+                )
+
+                data.update({
+                    "charge_trade_no": active_trade_no,
+                    "home_charge_status": home_charge_status,
+                    "has_home_charge_pile": True,
+                    "plug_and_charge_enabled": bool(
+                        _to_int(pile.get("plugAndChargeEnabled"))
+                    ),
+                    "charge_data_source": (
+                        "grpc_battery+charge_pile_api"
+                        if battery_ok
+                        else "charge_pile_api"
+                    ),
+                    "charge_pile_name": (
+                        pile.get("equipmentName")
+                        or pile.get("equipmentUserName")
+                    ),
+                    "charge_pile_address": pile.get("address"),
+                })
+
+                # An idle home pile says nothing about a car charging elsewhere,
+                # so it must not overwrite BatteryService telemetry.
+                if trade_no or is_charging or not battery_ok:
+                    session_energy = _to_float(status.get("totalPower"))
+                    if session_energy is None:
+                        session_energy = _to_float(
+                            pile.get("chargeUsePower")
+                        )
+                    data.update({
+                        "battery_charging_status": charging_state,
+                        "charger_connection_status": (
+                            PILE_CONNECTION_STATUS.get(
+                                connector_status, "unknown"
+                            )
+                        ),
+                        "estimated_charging_time": _to_int(
+                            status.get("estimatedChargingTime")
+                        ),
+                        "charging_power": charging_power,
+                        "charging_voltage": _to_float(
+                            status.get("voltageA")
+                        ),
+                        "charging_current": _to_float(
+                            status.get("currentA")
+                        ),
+                        "charging_session_energy": session_energy,
+                    })
+                pile_ok = True
 
             try:
-                orders = await self._api.get_charge_order_list()
+                orders = await self._api.get_charge_order_list(
+                    vin=self.vin, series_code=self.series_code
+                )
                 if orders:
                     latest = orders[0]
                     data["last_charge_order"] = {
@@ -753,12 +843,15 @@ class Vehicle(object):
 
         if not battery_ok and not pile_ok:
             self._data_source_status["battery"] = False
+            self._data_source_status["charge_pile"] = False
             self._restore_from_cache("battery")
             return
 
         for key, value in data.items():
             setattr(self, key, value)
         self._save_to_cache("battery", data)
+        self._data_source_status["battery"] = battery_ok
+        self._data_source_status["charge_pile"] = pile_ok
 
     async def _parse_odometer(self):
         try:
@@ -857,15 +950,18 @@ class Vehicle(object):
             if not self.isAaos:
                 return
             
-            engine_status_resp: GetEngineRemoteStartResp = await self._api.get_engine_remote_start_status(self.vin)
+            engine_status_resp: GetEngineRemoteStartResp = await self._api.get_engine_status(self.vin)
             engine_status = engine_status_resp.data
             _LOGGER.debug(engine_status)
             
             # Build data dict
             data = {
-                "engine_remote_running": (engine_status.engineRunningStatus == EngineRunningStatus.STARTED),
-                "engine_remote_start_time": engine_status.engineStartTimestamp,
-                "engine_remote_end_time": engine_status.engineStopTimestamp,
+                "engine_remote_running": engine_status.engineRunningStatus in (
+                    EngineRunningStatus.Starting,
+                    EngineRunningStatus.Running,
+                ),
+                "engine_remote_start_time": engine_status.engineStartTime.seconds,
+                "engine_remote_end_time": engine_status.engineEndTime.seconds,
             }
             
             # Set attributes
@@ -965,18 +1061,35 @@ class Vehicle(object):
         await self._api.climatization_control(self.vin, False)
 
     async def start_home_charge(self):
-        result = await self._api.start_charge_pile(self.vin)
+        result = await self._api.start_charge_pile(
+            self.vin, self.series_code
+        )
         if result and result.get("startChargeSeq"):
             self.charge_trade_no = result["startChargeSeq"]
+            self.home_charge_status = "starting"
         return result
 
     async def stop_home_charge(self):
-        if not self.charge_trade_no:
+        # Always re-read the live pile order so a stale cached trade number
+        # can never target an already-ended session.
+        trade_no = await self._api.get_active_trade_no(
+            self.vin,
+            self.series_code,
+            force_refresh=True,
+        )
+        if not trade_no:
             raise Exception("No active home-charge session to stop")
-        return await self._api.stop_charge_pile(self.charge_trade_no)
+        result = await self._api.stop_charge_pile(
+            trade_no, self.vin, self.series_code
+        )
+        self.charge_trade_no = None
+        self.home_charge_status = "stopping"
+        return result
 
     async def set_plug_and_charge(self, enabled: bool):
-        return await self._api.set_plug_and_charge(enabled)
+        return await self._api.set_plug_and_charge(
+            enabled, self.vin, self.series_code
+        )
 
     def get(self, key):
         if not hasattr(self, key):
@@ -996,7 +1109,7 @@ class Vehicle(object):
         await self._api.sunroof_contorl(self.vin, invocationControlType.CLOSE)
 
     async def sign_in(self):
-        return await self._api.sign_in()
+        return await self._api.sign_in(self.vin, self.series_code)
 
 
 def _to_float(value):

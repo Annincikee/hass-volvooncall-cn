@@ -10,6 +10,10 @@
                     "powertrain_type": "动力类型（轻混/纯油 或 混动）"
                 }
             }
+        },
+        "error": {
+            "missing_credentials": "手机号和密码不能为空。",
+            "unknown": "发生未知错误，请重试。"
         }
     },
     "options": {
@@ -131,6 +135,12 @@
             },
             "sunroof_switch": {
                 "name": "{nickname}天窗控制"
+            },
+            "home_charge_switch": {
+                "name": "{nickname}家用充电"
+            },
+            "plug_and_charge_switch": {
+                "name": "{nickname}插枪即充"
             }
         },
         "button": {
@@ -142,6 +152,9 @@
             },
             "honk_button": {
                 "name": "{nickname}鸣笛"
+            },
+            "app_sign_in_button": {
+                "name": "{nickname}App 每日签到"
             }
         },
         "number": {

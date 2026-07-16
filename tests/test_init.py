@@ -248,6 +248,27 @@ class TestVolvoCoordinator:
         mock_volvo_api.get_vehicles_vins.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_forced_refresh_bypasses_cached_scan_interval(
+        self, hass: HomeAssistant, mock_volvo_api
+    ):
+        """Control confirmation must perform a real update immediately."""
+        coordinator = VolvoCoordinator(
+            hass, mock_volvo_api, TEST_SCAN_INTERVAL
+        )
+        coordinator.data = [MagicMock()]
+        coordinator._last_update_started_at = datetime.now(timezone.utc)
+        coordinator._force_next_refresh = True
+        mock_volvo_api.get_vehicles_vins = AsyncMock(return_value={})
+
+        result = await coordinator._async_update_data()
+
+        assert result == []
+        mock_volvo_api.login.assert_awaited_once()
+        mock_volvo_api.update_token.assert_awaited_once()
+        mock_volvo_api.get_vehicles_vins.assert_awaited_once()
+        assert coordinator._force_next_refresh is False
+
+    @pytest.mark.asyncio
     async def test_coordinator_update_interval_change(self, hass: HomeAssistant, mock_volvo_api):
         """Test changing coordinator update interval."""
         coordinator = VolvoCoordinator(hass, mock_volvo_api, TEST_SCAN_INTERVAL)

@@ -1,11 +1,15 @@
-![Version](https://img.shields.io/github/v/release/idreamshen/hass-volvooncall-cn?color=green&label=Version)
-[![GitHub all releases](https://img.shields.io/github/downloads/idreamshen/hass-volvooncall-cn/total?label=Downloads)](https://github.com/idreamshen/hass-volvooncall-cn/releases)
+![Version](https://img.shields.io/github/v/release/Annincikee/hass-volvooncall-cn?color=green&label=Version)
+[![GitHub all releases](https://img.shields.io/github/downloads/Annincikee/hass-volvooncall-cn/total?label=Downloads)](https://github.com/Annincikee/hass-volvooncall-cn/releases)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
 
 # Volvo On Call CN
 
 Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车辆并将车辆数据和控制作为Home Assistant实体暴露。
+
+## 致谢
+
+本项目基于 [@idreamshen](https://github.com/idreamshen) 的 [hass-volvooncall-cn](https://github.com/idreamshen/hass-volvooncall-cn) 二次开发，核心协议对接与集成骨架均来自原项目；[@chliny](https://github.com/chliny) 实现了新版车机云端协议对接。感谢两位原作者的工作。
 
 ## 功能特点
 
@@ -28,7 +32,7 @@ Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车
 ## HACS 安装集成
 
 HACS -> 集成 -> 右上角三个点 -> 自定义存储库
-- 存储库：https://github.com/idreamshen/hass-volvooncall-cn
+- 存储库：https://github.com/Annincikee/hass-volvooncall-cn
 - 类别：集成
 
 浏览并下载存储库 -> 搜索 Volvo On Call CN 并下载
@@ -168,7 +172,3 @@ logger:
 
 <img src="images/screenshot-20230729-011246.png" alt="沃尔沃仪表盘" width="50%"/>
 <img src="images/screenshot-20230729-011320.png" alt="沃尔沃控制" width="50%"/>
-
-## 特别鸣谢
-
-- [@chliny](https://github.com/chliny) 实现了新版车机云端协议对接

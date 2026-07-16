@@ -6,6 +6,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import Platform
+from homeassistant.exceptions import HomeAssistantError
 
 from . import VolvoCoordinator, VolvoEntity
 from .volvooncall_cn import DOMAIN
@@ -210,13 +211,23 @@ class VolvoHomeChargeSwitch(VolvoEntity, SwitchEntity):
     @property
     def is_on(self):
         vehicle = self.coordinator.data[self.idx]
-        status = str(vehicle.get("battery_charging_status") or "").lower()
-        return status in ("charging", "smart_charging")
+        status = str(vehicle.get("home_charge_status") or "").lower()
+        return status in ("starting", "charging")
+
+    @property
+    def available(self):
+        vehicle = self.coordinator.data[self.idx]
+        return super().available and bool(
+            vehicle.get("has_home_charge_pile")
+        )
 
     @property
     def extra_state_attributes(self):
         vehicle = self.coordinator.data[self.idx]
-        return {"trade_no": vehicle.get("charge_trade_no")}
+        return {
+            "home_charge_status": vehicle.get("home_charge_status"),
+            "session_active": bool(vehicle.get("charge_trade_no")),
+        }
 
     async def async_turn_on(self) -> None:
         await self.coordinator.data[self.idx].start_home_charge()
@@ -229,9 +240,13 @@ class VolvoHomeChargeSwitch(VolvoEntity, SwitchEntity):
     async def _update_status(self, is_on):
         for _ in range(MAX_RETRIES):
             await asyncio.sleep(2)
-            await self.coordinator.async_refresh()
+            await self.coordinator.async_force_refresh()
             if self.is_on == is_on:
-                break
+                return
+        raise HomeAssistantError(
+            "Home charge command was sent but the requested state "
+            "could not be confirmed"
+        )
 
 
 class VolvoPlugAndChargeSwitch(VolvoEntity, SwitchEntity):
@@ -245,10 +260,28 @@ class VolvoPlugAndChargeSwitch(VolvoEntity, SwitchEntity):
         vehicle = self.coordinator.data[self.idx]
         return bool(vehicle.get("plug_and_charge_enabled"))
 
+    @property
+    def available(self):
+        vehicle = self.coordinator.data[self.idx]
+        return super().available and bool(
+            vehicle.get("has_home_charge_pile")
+        )
+
     async def async_turn_on(self) -> None:
         await self.coordinator.data[self.idx].set_plug_and_charge(True)
-        await self.coordinator.async_refresh()
+        await self._update_status(True)
 
     async def async_turn_off(self) -> None:
         await self.coordinator.data[self.idx].set_plug_and_charge(False)
-        await self.coordinator.async_refresh()
+        await self._update_status(False)
+
+    async def _update_status(self, is_on):
+        for _ in range(MAX_RETRIES):
+            await asyncio.sleep(2)
+            await self.coordinator.async_force_refresh()
+            if self.is_on == is_on:
+                return
+        raise HomeAssistantError(
+            "Plug-and-charge command was sent but the requested state "
+            "could not be confirmed"
+        )
