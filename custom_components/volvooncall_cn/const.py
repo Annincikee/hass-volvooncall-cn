@@ -11,6 +11,14 @@ POWERTRAIN_OPTIONS = {
     POWERTRAIN_HYBRID: "混动",
 }
 
+# Electric-only control entities (non-sensor platforms) that must be
+# cleaned up alongside ELECTRIC_SENSOR_KEYS when switching to a fuel car.
+ELECTRIC_CONTROL_KEYS = (
+    "home_charge_switch",
+    "plug_and_charge_switch",
+    "charge_limit_number",
+)
+
 ELECTRIC_SENSOR_KEYS = (
     "tm_energy_consumption",
     "battery_charge_level_percentage",

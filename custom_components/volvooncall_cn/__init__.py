@@ -23,7 +23,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 
-from .store import VolvoStore
+from .store import CHARGE_LIMIT_DISABLED, VolvoStore
 from .volvooncall_base import DEFAULT_SCAN_INTERVAL
 from .volvooncall_cn import VehicleAPI
 from .volvooncall_cn import Vehicle
@@ -31,6 +31,7 @@ from .volvooncall_cn import DOMAIN
 from .const import (
     CONF_POWERTRAIN_TYPE,
     DEFAULT_POWERTRAIN_TYPE,
+    ELECTRIC_CONTROL_KEYS,
     ELECTRIC_SENSOR_KEYS,
     POWERTRAIN_HYBRID,
 )
@@ -51,41 +52,52 @@ FRONTEND_PATH = Path(__file__).parent / "frontend"
 FRONTEND_URL_PATH = f"/{DOMAIN}/frontend"
 CARD_RESOURCE_PATH = f"{FRONTEND_URL_PATH}/volvo-car-card.js"
 CARD_RESOURCE_URL = f"{CARD_RESOURCE_PATH}?v=2.0.2"
+CHARGING_CARD_RESOURCE_PATH = f"{FRONTEND_URL_PATH}/volvo-charging-card.js"
+CHARGING_CARD_RESOURCE_URL = f"{CHARGING_CARD_RESOURCE_PATH}?v=1.0.0"
+CARD_RESOURCES = (
+    (CARD_RESOURCE_PATH, CARD_RESOURCE_URL),
+    (CHARGING_CARD_RESOURCE_PATH, CHARGING_CARD_RESOURCE_URL),
+)
 
 
 async def _async_register_card_resource(hass: HomeAssistant) -> None:
-    """Register the bundled Lovelace card when storage resources are used."""
+    """Register the bundled Lovelace cards when storage resources are used."""
     lovelace = hass.data.get(LOVELACE_DATA)
     if lovelace is None:
         _LOGGER.warning(
-            "Lovelace is not loaded; add %s as a module resource manually",
-            CARD_RESOURCE_URL,
+            "Lovelace is not loaded; add %s as module resources manually",
+            ", ".join(url for _, url in CARD_RESOURCES),
         )
         return
 
     if lovelace.resource_mode != MODE_STORAGE:
         _LOGGER.info(
-            "Lovelace resources use YAML mode; add %s as a module resource",
-            CARD_RESOURCE_URL,
+            "Lovelace resources use YAML mode; add %s as module resources",
+            ", ".join(url for _, url in CARD_RESOURCES),
         )
         return
 
     resources = lovelace.resources
     await resources.async_get_info()
-    for item in resources.async_items() or []:
-        url = item.get("url", "")
-        if url.split("?", 1)[0] != CARD_RESOURCE_PATH:
-            continue
-        if url != CARD_RESOURCE_URL:
-            await resources.async_update_item(
-                item["id"],
-                {"res_type": "module", "url": CARD_RESOURCE_URL},
+    items = resources.async_items() or []
+    for resource_path, resource_url in CARD_RESOURCES:
+        existing = next(
+            (
+                item
+                for item in items
+                if item.get("url", "").split("?", 1)[0] == resource_path
+            ),
+            None,
+        )
+        if existing is None:
+            await resources.async_create_item(
+                {"res_type": "module", "url": resource_url}
             )
-        return
-
-    await resources.async_create_item(
-        {"res_type": "module", "url": CARD_RESOURCE_URL}
-    )
+        elif existing.get("url") != resource_url:
+            await resources.async_update_item(
+                existing["id"],
+                {"res_type": "module", "url": resource_url},
+            )
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -107,7 +119,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 def remove_electric_entity_registry_entries(hass, config_entry_id):
     """Remove stale electric entities after switching to fuel."""
     registry = er.async_get(hass)
-    electric_suffixes = tuple(f"-{key}" for key in ELECTRIC_SENSOR_KEYS)
+    electric_suffixes = tuple(
+        f"-{key}" for key in ELECTRIC_SENSOR_KEYS + ELECTRIC_CONTROL_KEYS
+    )
     for registry_entry in er.async_entries_for_config_entry(
         registry, config_entry_id
     ):
@@ -310,6 +324,9 @@ class VolvoCoordinator(DataUpdateCoordinator):
                                 vehicle.battery_charging_status,
                                 vehicle.charging_power,
                             )
+                            await self._async_enforce_charge_limit(
+                                vehicle, store_data
+                            )
                         store_datas.append(store_data)
 
                     # Track successful update
@@ -342,6 +359,47 @@ class VolvoCoordinator(DataUpdateCoordinator):
             # DataUpdateCoordinator can occasionally coalesce refresh calls.
             # Never let a force flag leak into a later scheduled poll.
             self._force_next_refresh = False
+
+    async def _async_enforce_charge_limit(self, vehicle, store_data):
+        """Stop an active home-charge session once the SoC limit is reached.
+
+        The Volvo CN API has no native charge-limit setting, so the limit is
+        enforced here on every poll: only home-pile sessions can be stopped
+        remotely, and 100% means the limit is disabled. Resending the stop on
+        the next poll while the pile still reports charging is the retry path
+        for a stop command that has not taken effect yet.
+        """
+        limit = store_data.get_charge_limit()
+        if limit >= CHARGE_LIMIT_DISABLED:
+            return
+
+        battery_level = vehicle.battery_charge_level_percentage
+        try:
+            battery_value = float(battery_level)
+        except (TypeError, ValueError):
+            return
+        if battery_value < limit:
+            return
+
+        home_charge_status = str(vehicle.home_charge_status or "").lower()
+        if home_charge_status not in ("starting", "charging"):
+            return
+
+        _LOGGER.info(
+            "Battery of %s is at %.1f%% (limit %d%%); stopping home charge",
+            vehicle.vin,
+            battery_value,
+            limit,
+        )
+        try:
+            await vehicle.stop_home_charge()
+        except Exception as err:
+            _LOGGER.warning(
+                "Failed to stop home charge for %s at the %d%% limit: %s",
+                vehicle.vin,
+                limit,
+                err,
+            )
 
 metaMap = {
     "car_lock": {
@@ -620,6 +678,13 @@ metaMap = {
         "icon": "mdi:ev-plug-type2",
         "unit": "",
         "entity_id": "home_charge_switch",
+    },
+    "charge_limit_number": {
+        "name": "Charge Limit",
+        "device_class": None,
+        "icon": "mdi:battery-charging-90",
+        "unit": "%",
+        "entity_id": "charge_limit",
     },
     "plug_and_charge_switch": {
         "name": "Plug And Charge",
