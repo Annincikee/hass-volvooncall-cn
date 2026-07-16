@@ -5,7 +5,10 @@
 
 # Volvo On Call CN
 
-Homeassistant volvooncall 中国区插件，通过中国版沃尔沃API连接车辆并将车辆数据和控制作为Home Assistant实体暴露。
+> [!IMPORTANT]
+> 这是非官方社区项目，与 Volvo Cars 及其关联公司无隶属、合作或认可关系。名称仅用于说明兼容对象。
+
+非官方 Home Assistant 中国区车辆集成，通过相关在线服务连接用户自己的车辆，并将车辆数据和控制作为 Home Assistant 实体暴露。
 
 ## 致谢
 
@@ -76,7 +79,7 @@ stat_types:
 
 ## 内置 Lovelace 车辆卡片
 
-集成会自动注册 `custom:volvo-car-card`。卡片内置黑色 S90、XC60 和 XC90 俯视车模，支持门、窗、天窗、引擎盖和后备箱开闭定位，并针对窄栏和移动端自动调整布局。
+集成会自动注册 `custom:volvo-car-card`。卡片内置三种由 AI 独立生成、无品牌标识的通用轿车/中型 SUV/大型 SUV 俯视图，文件名仅用于兼容既有车型映射，不代表官方车型外观。卡片支持门、窗、天窗、引擎盖和后备箱开闭定位，并针对窄栏和移动端自动调整布局。
 
 ```yaml
 type: custom:volvo-car-card
@@ -169,7 +172,17 @@ logger:
     custom_components.volvooncall_cn: debug
 ```
 
+日志会对常见凭证与车辆标识做脱敏，但异常文本可能来自上游依赖。提交 Issue 前仍须人工检查，并且不要上传 `.storage`、数据库、备份或原始导出文件。安全问题请参阅 [SECURITY.md](SECURITY.md)。
+
+## 隐私与安全
+
+- 本集成本身不向维护者服务器发送遥测或诊断数据；所有在线请求直接发往车辆服务接口。
+- 手机号和密码保存在 Home Assistant 本地配置条目中；VIN 会用于实体唯一标识，车辆位置、状态和充电数据可能进入 Recorder 数据库及备份。
+- 请保护 Home Assistant 主机、限制配置与备份访问，并在分享日志、截图或诊断包前手动复核和脱敏。
+- 车型图片为 AI 独立生成的通用无标识素材，生成方式和使用边界见 [ASSET_PROVENANCE.md](ASSET_PROVENANCE.md)。
+
 ## 效果预览
 
-<img src="images/screenshot-20230729-011246.png" alt="沃尔沃仪表盘" width="50%"/>
-<img src="images/screenshot-20230729-011320.png" alt="沃尔沃控制" width="50%"/>
+新版预览仅使用模拟车辆、模拟实体与通用无标识车型图，不包含真实账号、VIN、位置或充电记录。
+
+<img src="images/privacy-safe-preview.png" alt="仅使用模拟数据的车辆卡片预览" width="100%"/>

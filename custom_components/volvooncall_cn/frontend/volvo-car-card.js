@@ -323,7 +323,7 @@ class VolvoCarCard extends HTMLElement {
       <ha-card class="${animateIn ? "animate-in" : ""}">
         <div class="hero">
           <div class="identity">
-            <span class="eyebrow">VOLVO CARS</span>
+            <span class="eyebrow">CONNECTED VEHICLE</span>
             <h2>${this._escape(title)}</h2>
             <div class="hero-meta">
               <span class="connection ${isOnline ? "" : "offline"}">

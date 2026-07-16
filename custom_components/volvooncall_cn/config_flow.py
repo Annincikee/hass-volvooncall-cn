@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from homeassistant import config_entries
@@ -18,6 +19,15 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def masked_account_title(username: str) -> str:
+    """Return a useful config-entry title without exposing the full account."""
+    username = str(username).strip()
+    if len(username) == 11 and username.isdigit():
+        return f"车辆账户 · {username[:3]}****{username[-4:]}"
+    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
+    return f"车辆账户 · account-{digest}"
+
+
 async def volvo_validation(hass, username, password) -> dict:
     errors = {}
     session = async_get_clientsession(hass)
@@ -27,8 +37,11 @@ async def volvo_validation(hass, username, password) -> dict:
         await volvo_api.login()
     except VolvoAPIError as err:
         errors["base"] = err.message
-    except Exception:
-        _LOGGER.exception("Unhandled exception in user step")
+    except Exception as err:
+        _LOGGER.error(
+            "Unhandled exception in user step (%s); details suppressed",
+            type(err).__name__,
+        )
         errors["base"] = "unknown"
     return errors
 
@@ -62,7 +75,9 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 errors = await volvo_validation(self.hass, username, password)
                 if not errors:
-                    return self.async_create_entry(title=username, data=user_input)
+                    return self.async_create_entry(
+                        title=masked_account_title(username), data=user_input
+                    )
         config_schema = vol.Schema({
             vol.Required(CONF_USERNAME): str,
             vol.Required(CONF_PASSWORD): str,
@@ -103,7 +118,7 @@ class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
         if init_done:
             errors = await volvo_validation(self.hass, username, password)
             if not errors:
-                return self.async_create_entry(title=username, data=user_input)
+                return self.async_create_entry(title="", data=user_input)
 
         config_schema = vol.Schema({
             vol.Required(CONF_USERNAME, default=username): str,

@@ -9,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.volvooncall_cn.config_flow import (
     VolvoOnCallCnConfigFlow,
     VolvoOnCallCnOptionsFlow,
+    masked_account_title,
     volvo_validation,
 )
 from custom_components.volvooncall_cn.volvooncall_base import VolvoAPIError, DEFAULT_SCAN_INTERVAL
@@ -99,11 +100,18 @@ class TestConfigFlow:
             )
             
             assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-            assert result["title"] == TEST_USERNAME
+            assert result["title"] == masked_account_title(TEST_USERNAME)
             assert result["data"][CONF_USERNAME] == TEST_USERNAME
             assert result["data"][CONF_PASSWORD] == TEST_PASSWORD
             assert result["data"][CONF_SCAN_INTERVAL] == TEST_SCAN_INTERVAL
             assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_HYBRID
+
+    def test_account_title_masks_phone_and_hashes_other_accounts(self):
+        phone = "138" + "0013" + "8000"
+        assert masked_account_title(phone) == "车辆账户 · 138****8000"
+        title = masked_account_title("private@example.com")
+        assert title.startswith("车辆账户 · account-")
+        assert "private@example.com" not in title
 
     @pytest.mark.asyncio
     async def test_user_flow_invalid_credentials(self, hass: HomeAssistant):

@@ -24,7 +24,7 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 
 from .store import CHARGE_LIMIT_DISABLED, VolvoStore
-from .volvooncall_base import DEFAULT_SCAN_INTERVAL
+from .volvooncall_base import DEFAULT_SCAN_INTERVAL, redact_sensitive, vehicle_log_ref
 from .volvooncall_cn import VehicleAPI
 from .volvooncall_cn import Vehicle
 from .volvooncall_cn import DOMAIN
@@ -248,13 +248,20 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 last_error = err
                 if attempt < max_retries:
                     _LOGGER.warning(
-                        f"Attempt {attempt + 1}/{max_retries + 1} failed: {err}. "
-                        f"Retrying in {delay}s..."
+                        "Attempt %d/%d failed: %s. Retrying in %.1fs...",
+                        attempt + 1,
+                        max_retries + 1,
+                        redact_sensitive(err),
+                        delay,
                     )
                     await asyncio.sleep(delay)
                     delay *= 2  # Exponential backoff
                 else:
-                    _LOGGER.error(f"All {max_retries + 1} attempts failed: {err}")
+                    _LOGGER.error(
+                        "All %d attempts failed: %s",
+                        max_retries + 1,
+                        redact_sensitive(err),
+                    )
                     raise last_error
 
     async def _async_update_data(self):
@@ -307,7 +314,10 @@ class VolvoCoordinator(DataUpdateCoordinator):
                         except Exception as err:
                             vehicle._consecutive_failures += 1
                             _LOGGER.error(
-                                f"Failed to update vehicle {vin} (failure #{vehicle._consecutive_failures}): {err}"
+                                "Failed to update %s (failure #%d): %s",
+                                vehicle_log_ref(vin),
+                                vehicle._consecutive_failures,
+                                redact_sensitive(err),
                             )
                             # Don't raise - continue with cached data
 
@@ -337,9 +347,12 @@ class VolvoCoordinator(DataUpdateCoordinator):
             except Exception as err:
                 # Track failure but still return vehicles with cache
                 self._consecutive_failures += 1
-                self._last_failure_reason = str(err)
+                safe_error = redact_sensitive(err)
+                self._last_failure_reason = safe_error
                 _LOGGER.error(
-                    f"Coordinator update failed (failure #{self._consecutive_failures}): {err}"
+                    "Coordinator update failed (failure #%d): %s",
+                    self._consecutive_failures,
+                    safe_error,
                 )
 
                 # If we have existing data (vehicles from previous update), return it
@@ -348,7 +361,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
                     return self.data
 
                 # Only raise if we have no data at all (first load)
-                raise UpdateFailed(f"Error communicating with API: {err}")
+                raise UpdateFailed(f"Error communicating with API: {safe_error}")
 
     async def async_force_refresh(self):
         """Refresh immediately after a control command, bypassing throttling."""
@@ -386,9 +399,8 @@ class VolvoCoordinator(DataUpdateCoordinator):
             return
 
         _LOGGER.info(
-            "Battery of %s is at %.1f%% (limit %d%%); stopping home charge",
-            vehicle.vin,
-            battery_value,
+            "%s reached the configured %d%% limit; stopping home charge",
+            vehicle_log_ref(vehicle.vin),
             limit,
         )
         try:
@@ -396,9 +408,9 @@ class VolvoCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.warning(
                 "Failed to stop home charge for %s at the %d%% limit: %s",
-                vehicle.vin,
+                vehicle_log_ref(vehicle.vin),
                 limit,
-                err,
+                redact_sensitive(err),
             )
 
 metaMap = {

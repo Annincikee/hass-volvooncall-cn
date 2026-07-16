@@ -50,7 +50,17 @@ class VolvoAPIError(Exception):
 def redact_sensitive(value):
     """Return a log-safe string without credentials or vehicle identifiers."""
     text = str(value)
-    text = re.sub(r"(refreshToken=)[^&\s'\"]+", r"\1<redacted>", text)
+    sensitive_keys = (
+        "authorization|password|refreshToken|X-Token|phone|phoneNumber|vin|"
+        "vinCode|deviceid|uuid|connectorId|orderNo|tradeNo|memberId|latitude|"
+        "longitude"
+    )
+    text = re.sub(
+        rf"((?:{sensitive_keys})=)[^&\s'\"]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"(authorization['\"]?\s*[:=]\s*['\"]?Bearer\s+)[^,'\"\s]+",
         r"\1<redacted>",
@@ -64,19 +74,32 @@ def redact_sensitive(value):
         flags=re.IGNORECASE,
     )
     text = re.sub(
-        r"((?:phone|phoneNumber|vin|vinCode)=)[^&\s'\"]+",
-        r"\1<redacted>",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"((?:phone|phoneNumber|vin|vinCode)['\"]?\s*[:=]\s*['\"]?)"
+        rf"((?:{sensitive_keys})['\"]?\s*[:=]\s*['\"]?)"
         r"[^,'\"\s]+",
         r"\1<redacted>",
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(
+        r"(?<!\d)1[3-9]\d{9}(?!\d)",
+        "<redacted-phone>",
+        text,
+    )
+    text = re.sub(
+        r"(?<![A-HJ-NPR-Z0-9])(?=[A-HJ-NPR-Z0-9]{17}(?![A-HJ-NPR-Z0-9]))"
+        r"(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])(?=[A-HJ-NPR-Z0-9]*\d)"
+        r"[A-HJ-NPR-Z0-9]{17}",
+        "<redacted-vin>",
+        text,
+        flags=re.IGNORECASE,
+    )
     return text
+
+
+def vehicle_log_ref(vin):
+    """Return a stable, non-reversible reference suitable for log messages."""
+    digest = hashlib.sha256(str(vin).encode("utf-8")).hexdigest()[:10]
+    return f"vehicle-{digest}"
 
 
 class VehicleBaseAPI:
@@ -137,9 +160,9 @@ class VehicleBaseAPI:
                 raise
             except Exception as error:
                 _LOGGER.warning(
-                    "Failure when communicating with the server: %s",
+                    "Failure when communicating with the server (%s): %s",
+                    type(error).__name__,
                     redact_sensitive(error),
-                    exc_info=True,
                 )
                 if i < max_attempts - 1:  # Don't delay on last attempt
                     await asyncio.sleep(2**i)  # Exponential backoff
