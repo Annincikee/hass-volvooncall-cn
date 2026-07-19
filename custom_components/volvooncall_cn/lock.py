@@ -50,7 +50,10 @@ class VolvoSensor(VolvoEntity, LockEntity):
     @property
     def is_locked(self) -> bool | None:
         """Handle updated data from the coordinator."""
-        return self.coordinator.data[self.idx].get("car_locked")
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
+        return vehicle.get("car_locked")
 
     async def _update_status(self, is_locked):
         for _ in range(MAX_RETRIES):
@@ -61,12 +64,12 @@ class VolvoSensor(VolvoEntity, LockEntity):
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the car."""
-        await self.coordinator.data[self.idx].lock_vehicle()
+        await self.vehicle.lock_vehicle()
         await self._update_status(True)
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the car."""
-        await self.coordinator.data[self.idx].unlock_vehicle()
+        await self.vehicle.unlock_vehicle()
         await self._update_status(False)
 
 
@@ -75,12 +78,14 @@ class VolvoWindowSensor(VolvoEntity, LockEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.LOCK)
 
     @property
-    def is_locked(self) -> bool:
-        data = self.coordinator.data[self.idx]
+    def is_locked(self) -> bool | None:
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
         window_keys = ["front_left_window_open", "front_right_window_open",
                        "rear_right_window_open", "rear_left_window_open"]
         for window in window_keys:
-            is_open = data.get(window)
+            is_open = vehicle.get(window)
             _LOGGER.debug("%s %s", window, is_open)
             if is_open:
                 return False
@@ -94,9 +99,9 @@ class VolvoWindowSensor(VolvoEntity, LockEntity):
                 break
 
     async def async_lock(self, **kwargs: Any) -> None:
-        await self.coordinator.data[self.idx].lock_window()
+        await self.vehicle.lock_window()
         await self._update_status(True)
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        await self.coordinator.data[self.idx].unlock_window()
+        await self.vehicle.unlock_window()
         await self._update_status(False)

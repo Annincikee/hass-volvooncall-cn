@@ -79,7 +79,10 @@ class VolvoSensor(VolvoEntity, SensorEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        self._attr_native_value = self.coordinator.data[self.idx].get(self.metaMapKey)
+        vehicle = self.vehicle
+        if vehicle is None:
+            return
+        self._attr_native_value = vehicle.get(self.metaMapKey)
         self._attr_native_unit_of_measurement = metaMap[self.metaMapKey]["unit"]
         # Set state_class if defined in metaMap
         if "state_class" in metaMap[self.metaMapKey]:
@@ -91,7 +94,6 @@ class VolvoSensor(VolvoEntity, SensorEntity):
             "battery_charging_status",
             "charger_connection_status",
         }:
-            vehicle = self.coordinator.data[self.idx]
             self._attr_extra_state_attributes = {
                 "data_source": vehicle.charge_data_source,
                 "charge_pile_name": vehicle.charge_pile_name,
@@ -114,7 +116,9 @@ class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return
         self._attr_native_value = vehicle.connection_status
         # Add last_update_time as an attribute
         self._attr_extra_state_attributes = {
@@ -135,7 +139,9 @@ class VolvoFullChargeRangeSensor(VolvoEntity, SensorEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Publish the most recent persisted full-charge range sample."""
-        store_data = self.coordinator.store_datas[self.idx]
+        store_data = self._get_store()
+        if store_data is None:
+            return
         self._attr_native_value = store_data.get(
             "full_charge_electric_range"
         )

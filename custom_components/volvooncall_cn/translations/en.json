@@ -9,11 +9,21 @@
                     "scan_interval": "Scan Interval(s, minimum 30)",
                     "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)"
                 }
+            },
+            "reauth_confirm": {
+                "description": "The Volvo account password for {username} was rejected. Enter the new password to resume polling.",
+                "data": {
+                    "password": "Password"
+                }
             }
         },
         "error": {
             "missing_credentials": "Username and password are both required.",
             "unknown": "Unexpected error, please try again."
+        },
+        "abort": {
+            "reauth_successful": "Re-authentication was successful.",
+            "reauth_failed": "Re-authentication could not be started, please remove and re-add the integration."
         }
     },
     "options": {
@@ -233,10 +243,18 @@
             "full_charge_electric_range": {
                 "name": "{nickname} Full charge electric range",
                 "state_attributes": {
-                    "sampled_at": { "name": "Sampled at" },
-                    "sample_count": { "name": "Sample count" },
-                    "data_source": { "name": "Data source" },
-                    "trigger_battery_level": { "name": "Trigger battery level" }
+                    "sampled_at": {
+                        "name": "Sampled at"
+                    },
+                    "sample_count": {
+                        "name": "Sample count"
+                    },
+                    "data_source": {
+                        "name": "Data source"
+                    },
+                    "trigger_battery_level": {
+                        "name": "Trigger battery level"
+                    }
                 }
             },
             "battery_charging_status": {
@@ -254,9 +272,15 @@
                     "aborted": "Aborted"
                 },
                 "state_attributes": {
-                    "data_source": { "name": "Data source" },
-                    "charge_pile_name": { "name": "Charge pile name" },
-                    "charge_pile_address": { "name": "Charge pile address" }
+                    "data_source": {
+                        "name": "Data source"
+                    },
+                    "charge_pile_name": {
+                        "name": "Charge pile name"
+                    },
+                    "charge_pile_address": {
+                        "name": "Charge pile address"
+                    }
                 }
             },
             "charger_connection_status": {
@@ -273,9 +297,15 @@
                     "fault": "Fault"
                 },
                 "state_attributes": {
-                    "data_source": { "name": "Data source" },
-                    "charge_pile_name": { "name": "Charge pile name" },
-                    "charge_pile_address": { "name": "Charge pile address" }
+                    "data_source": {
+                        "name": "Data source"
+                    },
+                    "charge_pile_name": {
+                        "name": "Charge pile name"
+                    },
+                    "charge_pile_address": {
+                        "name": "Charge pile address"
+                    }
                 }
             },
             "estimated_charging_time": {

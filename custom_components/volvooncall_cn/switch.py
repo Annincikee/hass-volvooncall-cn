@@ -71,9 +71,11 @@ class VolvoSwitchEntity(VolvoEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        coordinator = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
         for key in self.checkMetaKeys:
-            if coordinator.get(key):
+            if vehicle.get(key):
                 return True
         return False
 
@@ -84,22 +86,23 @@ class VolvoEngineSwitch(VolvoSwitchEntity):
         super().__init__(coordinator, idx, metaKey, check_meta_keys)
 
     async def async_turn_on(self) -> None:
-        duration = self.coordinator.store_datas[self.idx].get_engine_duration_number()
-        await self.coordinator.data[self.idx].engine_start(duration)
+        store_data = self._get_store()
+        duration = store_data.get_engine_duration_number() if store_data else 5
+        await self.vehicle.engine_start(duration)
         await self._update_status(True)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].engine_stop()
+        await self.vehicle.engine_stop()
         await self._update_status(False)
 
     @property
     def extra_state_attributes(self):
-        start_time = "engine_remote_start_time"
-        end_time = "engine_remote_end_time"
-        data = self.coordinator.data[self.idx]
+        data = self.vehicle
+        if data is None:
+            return {}
         return {
-            "remote_start_at": data.get(start_time),
-            "remote_end_at": data.get(end_time)
+            "remote_start_at": data.get("engine_remote_start_time"),
+            "remote_end_at": data.get("engine_remote_end_time")
         }
 
 
@@ -120,7 +123,9 @@ class VolvoClimatizationSwitch(VolvoEntity, SwitchEntity):
         self._cancel_auto_off = None
 
     def _is_charger_connected(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return False
         connection_status = str(
             vehicle.get("charger_connection_status") or ""
         ).lower()
@@ -157,13 +162,13 @@ class VolvoClimatizationSwitch(VolvoEntity, SwitchEntity):
         )
 
     async def async_turn_on(self) -> None:
-        await self.coordinator.data[self.idx].climatization_start()
+        await self.vehicle.climatization_start()
         self._attr_is_on = True
         self._schedule_auto_off()
         self.async_write_ha_state()
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].climatization_stop()
+        await self.vehicle.climatization_stop()
         self._cancel_auto_off_timer()
         self._attr_is_on = False
         self.async_write_ha_state()
@@ -178,13 +183,13 @@ class VolvoTailgateSwitch(VolvoSwitchEntity):
         super().__init__(coordinator, idx, metaKey, check_keys)
 
     async def async_turn_on(self) -> None:
-        coordinator = self.coordinator.data[self.idx]
-        await coordinator.unlock_vehicle_trunk_only()
-        await coordinator.tail_gate_control_open()
+        vehicle = self.vehicle
+        await vehicle.unlock_vehicle_trunk_only()
+        await vehicle.tail_gate_control_open()
         await self._update_status(True)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].tail_gate_control_close()
+        await self.vehicle.tail_gate_control_close()
         await self._update_status(False)
 
 
@@ -194,11 +199,11 @@ class VolvoSunroofSwitch(VolvoSwitchEntity):
         super().__init__(coordinator, idx, metaKey, check_keys)
 
     async def async_turn_on(self) -> None:
-        await self.coordinator.data[self.idx].sunroof_control_open()
+        await self.vehicle.sunroof_control_open()
         await self._update_status(True)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].sunroof_control_close()
+        await self.vehicle.sunroof_control_close()
         await self._update_status(False)
 
 
@@ -210,31 +215,37 @@ class VolvoHomeChargeSwitch(VolvoEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
         status = str(vehicle.get("home_charge_status") or "").lower()
         return status in ("starting", "charging")
 
     @property
     def available(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return False
         return super().available and bool(
             vehicle.get("has_home_charge_pile")
         )
 
     @property
     def extra_state_attributes(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return {}
         return {
             "home_charge_status": vehicle.get("home_charge_status"),
             "session_active": bool(vehicle.get("charge_trade_no")),
         }
 
     async def async_turn_on(self) -> None:
-        await self.coordinator.data[self.idx].start_home_charge()
+        await self.vehicle.start_home_charge()
         await self._update_status(True)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].stop_home_charge()
+        await self.vehicle.stop_home_charge()
         await self._update_status(False)
 
     async def _update_status(self, is_on):
@@ -257,22 +268,26 @@ class VolvoPlugAndChargeSwitch(VolvoEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
         return bool(vehicle.get("plug_and_charge_enabled"))
 
     @property
     def available(self):
-        vehicle = self.coordinator.data[self.idx]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return False
         return super().available and bool(
             vehicle.get("has_home_charge_pile")
         )
 
     async def async_turn_on(self) -> None:
-        await self.coordinator.data[self.idx].set_plug_and_charge(True)
+        await self.vehicle.set_plug_and_charge(True)
         await self._update_status(True)
 
     async def async_turn_off(self) -> None:
-        await self.coordinator.data[self.idx].set_plug_and_charge(False)
+        await self.vehicle.set_plug_and_charge(False)
         await self._update_status(False)
 
     async def _update_status(self, is_on):

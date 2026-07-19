@@ -63,7 +63,10 @@ class VolvoSensor(VolvoEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         """Handle updated data from the coordinator."""
-        return self.coordinator.data[self.idx].get(self.metaMapKey)
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
+        return vehicle.get(self.metaMapKey)
 
 
 class VolvoWindowSensor(VolvoSensor):
@@ -72,5 +75,8 @@ class VolvoWindowSensor(VolvoSensor):
 
     @property
     def extra_state_attributes(self):
+        vehicle = self.vehicle
+        if vehicle is None:
+            return {}
         metaKey = self.metaMapKey + "_ajar"
-        return {"open_status_ajar": self.coordinator.data[self.idx].get(metaKey)}
+        return {"open_status_ajar": vehicle.get(metaKey)}

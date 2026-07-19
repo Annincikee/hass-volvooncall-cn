@@ -9,11 +9,21 @@
                     "scan_interval": "扫描间隔(单位秒，最小30)",
                     "powertrain_type": "动力类型（轻混/纯油 或 混动）"
                 }
+            },
+            "reauth_confirm": {
+                "description": "账号 {username} 的密码已失效或被服务器拒绝，请输入新密码以恢复数据更新。",
+                "data": {
+                    "password": "密码"
+                }
             }
         },
         "error": {
             "missing_credentials": "手机号和密码不能为空。",
             "unknown": "发生未知错误，请重试。"
+        },
+        "abort": {
+            "reauth_successful": "重新认证成功。",
+            "reauth_failed": "无法启动重新认证，请删除后重新添加集成。"
         }
     },
     "options": {
@@ -233,10 +243,18 @@
             "full_charge_electric_range": {
                 "name": "{nickname}最近满电续航",
                 "state_attributes": {
-                    "sampled_at": { "name": "采样时间" },
-                    "sample_count": { "name": "采样次数" },
-                    "data_source": { "name": "数据源" },
-                    "trigger_battery_level": { "name": "触发电量" }
+                    "sampled_at": {
+                        "name": "采样时间"
+                    },
+                    "sample_count": {
+                        "name": "采样次数"
+                    },
+                    "data_source": {
+                        "name": "数据源"
+                    },
+                    "trigger_battery_level": {
+                        "name": "触发电量"
+                    }
                 }
             },
             "battery_charging_status": {
@@ -254,9 +272,15 @@
                     "aborted": "异常结束"
                 },
                 "state_attributes": {
-                    "data_source": { "name": "数据源" },
-                    "charge_pile_name": { "name": "充电桩名称" },
-                    "charge_pile_address": { "name": "充电桩地址" }
+                    "data_source": {
+                        "name": "数据源"
+                    },
+                    "charge_pile_name": {
+                        "name": "充电桩名称"
+                    },
+                    "charge_pile_address": {
+                        "name": "充电桩地址"
+                    }
                 }
             },
             "charger_connection_status": {
@@ -273,9 +297,15 @@
                     "fault": "故障"
                 },
                 "state_attributes": {
-                    "data_source": { "name": "数据源" },
-                    "charge_pile_name": { "name": "充电桩名称" },
-                    "charge_pile_address": { "name": "充电桩地址" }
+                    "data_source": {
+                        "name": "数据源"
+                    },
+                    "charge_pile_name": {
+                        "name": "充电桩名称"
+                    },
+                    "charge_pile_address": {
+                        "name": "充电桩地址"
+                    }
                 }
             },
             "estimated_charging_time": {

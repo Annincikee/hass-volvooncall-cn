@@ -21,6 +21,24 @@ from custom_components.volvooncall_cn.switch import (
 from custom_components.volvooncall_cn.volvooncall_cn import Vehicle, VehicleAPI
 
 
+class FakeStreamCall:
+    """Mimic grpc.aio's UnaryStreamCall: async-iterable plus cancel()."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.cancelled = False
+
+    def __aiter__(self):
+        async def _gen():
+            for response in self._responses:
+                yield response
+
+        return _gen()
+
+    def cancel(self):
+        self.cancelled = True
+
+
 class FakeInvocationStub:
     """Capture climatization requests made through InvocationService."""
 
@@ -31,19 +49,19 @@ class FakeInvocationStub:
 
     def ClimatizationStart(self, req, metadata=None, timeout=None):
         self.calls.append(("start", req, metadata, timeout))
-        return [
+        return FakeStreamCall([
             invocationCommResp(
                 data=invocationData(status=invocationStatus.SUCCESS)
             )
-        ]
+        ])
 
     def ClimatizationStop(self, req, metadata=None, timeout=None):
         self.calls.append(("stop", req, metadata, timeout))
-        return [
+        return FakeStreamCall([
             invocationCommResp(
                 data=invocationData(status=invocationStatus.SUCCESS)
             )
-        ]
+        ])
 
 
 @pytest.mark.asyncio

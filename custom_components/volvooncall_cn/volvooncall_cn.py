@@ -1,6 +1,7 @@
 import logging
 import datetime
 import grpc
+from grpc import aio as grpc_aio
 import asyncio
 from datetime import datetime as dt, timedelta, timezone
 from typing import Dict, Any, Optional
@@ -51,7 +52,23 @@ GRPC_LBS_VOLVO_HOST = "cepmobtoken.lbs.prod.c3.volvocars.com.cn:443"
 USER_AGENT = "vca-android/5.53.1 grpc-java-okhttp/1.68.0"
 MAX_RETRIES = 1
 TIMEOUT = datetime.timedelta(seconds=10)
+TIMEOUT_SECONDS = int(TIMEOUT.total_seconds())
 DOMAIN = "volvooncall_cn"
+
+
+async def _first_stream_response(call, default=None):
+    """Await the first message of a server-streaming RPC, then cancel it.
+
+    All of Volvo's RPCs are unary-stream; the app only ever consumes the
+    first message. Cancelling releases the stream without waiting for the
+    server to close it.
+    """
+    try:
+        async for res in call:
+            return res
+    finally:
+        call.cancel()
+    return default
 
 BATTERY_CHARGING_STATUS = {
     0: "unknown",
@@ -108,11 +125,14 @@ class VehicleAPI(VehicleBaseAPI):
         callback(metadata, None)
 
     async def gen_channel(self, target):
+        # grpc.aio keeps every RPC on the event loop; the previous sync
+        # channel blocked Home Assistant's loop for up to the full RPC
+        # timeout on every call.
         callCreds = grpc.metadata_call_credentials(self._metadata_callback)
         sslCreds = grpc.ssl_channel_credentials()
         creds = grpc.composite_channel_credentials(sslCreds, callCreds)
         channel_options: tuple = (("grpc.primary_user_agent", USER_AGENT), ('grpc.accept_encoding', 'gzip'),)
-        channel = grpc.secure_channel(target, creds, options=channel_options)
+        channel = grpc_aio.secure_channel(target, creds, options=channel_options)
         return channel
 
     async def get_channel(self):
@@ -132,6 +152,18 @@ class VehicleAPI(VehicleBaseAPI):
             if not self.lbs_channel:
                 self.lbs_channel = await self.gen_channel(GRPC_LBS_VOLVO_HOST)
         return self.lbs_channel
+
+    async def close(self):
+        """Release both gRPC channels (entry unload or API replacement)."""
+        channel, self.channel = self.channel, None
+        lbs_channel, self.lbs_channel = self.lbs_channel, None
+        for open_channel in (channel, lbs_channel):
+            if open_channel is None:
+                continue
+            try:
+                await open_channel.close()
+            except Exception as err:
+                _LOGGER.debug("Error closing gRPC channel: %s", err)
 
     def raise_invocation_fail(self, status):
         if status in [invocationStatus.SUCCESS, invocationStatus.SENT, invocationStatus.DELIVERED]:
@@ -155,66 +187,72 @@ class VehicleAPI(VehicleBaseAPI):
         stub = FuelServiceStub(await self.get_channel())
         req = GetFuelReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = GetFuelResp()
-        for res in stub.GetFuel(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.GetFuel(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else GetFuelResp()
 
     async def get_exterior(self, vin) -> GetExteriorResp:
         stub = ExteriorServiceStub(await self.get_channel())
         req = GetExteriorReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = GetExteriorResp()
-        for res in stub.GetExterior(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.GetExterior(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else GetExteriorResp()
 
     async def get_health(self, vin) -> GetHealthResp:
         stub = HealthServiceStub(await self.get_channel())
         req = GetHealthReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = GetHealthResp()
-        for res in stub.GetHealth(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
+        res = await _first_stream_response(
+            stub.GetHealth(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is None:
+            return GetHealthResp()
+        _LOGGER.debug("get_health resp")
+        _LOGGER.debug(res)
         return res
 
     async def get_odometer(self, vin) -> GetOdometerResp:
         stub = OdometerServiceStub(await self.get_channel())
         req = GetOdometerReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = GetOdometerResp()
-        for res in stub.GetOdometer(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.GetOdometer(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else GetOdometerResp()
 
     async def get_availability(self, vin) -> GetAvailabilityResp:
         stub = AvailabilityServiceStub(await self.get_channel())
         req = GetAvailabilityReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = GetAvailabilityResp()
-        for res in stub.GetAvailability(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.GetAvailability(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else GetAvailabilityResp()
 
     async def window_control(self, vin, opentype):
         stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = windowControlReq(head=req_header, openType=opentype)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.WindowControl(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.WindowControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def get_location(self, vin) -> StreamLastKnownLocationsResp:
         stub = DtlInternetServiceStub(await self.get_lbs_channel())
         req = StreamLastKnownLocationsReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res: StreamLastKnownLocationsResp = StreamLastKnownLocationsResp()
-        for res in stub.StreamLastKnownLocations(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.StreamLastKnownLocations(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else StreamLastKnownLocationsResp()
 
     async def engine_control(self, vin, isStart: bool, duration: int):
         stub = InvocationServiceStub(await self.get_channel())
@@ -225,10 +263,12 @@ class VehicleAPI(VehicleBaseAPI):
         else:
             req = EngineStartReq(head=req_header, isStart=isStart)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.EngineStart(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.EngineStart(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def climatization_control(self, vin: str, is_start: bool):
@@ -244,27 +284,30 @@ class VehicleAPI(VehicleBaseAPI):
                 compartmentTemperatureCelsius=0,
             )
             responses = stub.ClimatizationStart(
-                req, metadata=metadata, timeout=TIMEOUT.seconds
+                req, metadata=metadata, timeout=TIMEOUT_SECONDS
             )
         else:
             req = ClimatizationStopReq(head=req_header)
             responses = stub.ClimatizationStop(
-                req, metadata=metadata, timeout=TIMEOUT.seconds
+                req, metadata=metadata, timeout=TIMEOUT_SECONDS
             )
 
-        for res in responses:
+        res = await _first_stream_response(responses)
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
 
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
         stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = HonkFlashReq(head=req_header, honkFlashType=honk_flash_type)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.HonkFlash(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.HonkFlash(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def door_lock(self, vin):
@@ -272,10 +315,12 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = LockReq(head=req_header, lockType=LockType.LOCK_REDUCED_GUARD)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.Lock(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.Lock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def door_unlock(self, vin, unlockType):
@@ -285,19 +330,24 @@ class VehicleAPI(VehicleBaseAPI):
         if unlockType != UnlockType.UNLOCK_UNSPECIFIED:
             req = UnlockReq(head=req_header, unlockType=unlockType)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.Unlock(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.Unlock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def get_engine_status(self, vin):
         stub = EngineRemoteStartServiceStub(await self.get_channel())
         req = GetEngineRemoteStartReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res: GetEngineRemoteStartResp = GetEngineRemoteStartResp()
-        for res in stub.GetEngineRemoteStart(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
+        res = await _first_stream_response(
+            stub.GetEngineRemoteStart(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is None:
+            return GetEngineRemoteStartResp()
+        _LOGGER.debug(res)
         return res
 
     async def sunroof_contorl(self, vin: str, controlType: invocationControlType):
@@ -305,10 +355,12 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = SunroofControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.SunroofControl(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.SunroofControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def tailgate_contorl(self, vin: str, controlType: invocationControlType):
@@ -316,10 +368,12 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = TailgateControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.TailgateControl(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.TailgateControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def update_status(self, vin: str):
@@ -327,19 +381,25 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = UpdateStatusReq(head=req_header)
         metadata: list = [("vin", vin)]
-        res: invocationCommResp = invocationCommResp()
-        for res in stub.UpdateStatus(req, metadata=metadata, timeout=TIMEOUT.seconds):
+        res = await _first_stream_response(
+            stub.UpdateStatus(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is not None:
+            _LOGGER.debug("update_status resp")
+            _LOGGER.debug(res)
             self.raise_invocation_fail(res.data.status)
-            break
         return
 
     async def get_car_preferences(self, vin: str):
         stub = CarPreferencesStub(await self.get_channel())
         req = GetPreferencesReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res: GetPreferencesResp = GetPreferencesResp()
-        for res in stub.GetPreferences(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
+        res = await _first_stream_response(
+            stub.GetPreferences(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is None:
+            return GetPreferencesResp()
+        _LOGGER.debug(res)
         return res
 
     async def get_battery_status(self, vin: str) -> GetBatteryResponse:
@@ -347,19 +407,22 @@ class VehicleAPI(VehicleBaseAPI):
         stub = BatteryServiceStub(await self.get_channel())
         req = GetBatteryRequest(vin=vin)
         metadata: list = [("vin", vin)]
-        res: GetBatteryResponse = GetBatteryResponse()
-        for res in stub.GetLatestBattery(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
-        return res
+        res = await _first_stream_response(
+            stub.GetLatestBattery(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        return res if res is not None else GetBatteryResponse()
 
     async def update_car_preference(self, vin: str, nickname: str):
         stub = CarPreferencesStub(await self.get_channel())
         preference = Preference(nickName=nickname)
         req = UpdatePreferencesReq(vin=vin, preference=preference)
         metadata: list = [("vin", vin)]
-        res: UpdatePreferencesResp = UpdatePreferencesResp()
-        for res in stub.UpdatePreferences(req, metadata=metadata, timeout=TIMEOUT.seconds):
-            break
+        res = await _first_stream_response(
+            stub.UpdatePreferences(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        )
+        if res is None:
+            return UpdatePreferencesResp()
+        _LOGGER.debug(res)
         return res
 
 

@@ -36,7 +36,7 @@ class VolvoFlashButton(VolvoEntity, ButtonEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
 
     async def async_press(self) -> None:
-        await self.coordinator.data[self.idx].flash()
+        await self.vehicle.flash()
 
 
 class VolvoHonkFlashButton(VolvoEntity, ButtonEntity):
@@ -46,7 +46,7 @@ class VolvoHonkFlashButton(VolvoEntity, ButtonEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
 
     async def async_press(self) -> None:
-        await self.coordinator.data[self.idx].honk_and_flash()
+        await self.vehicle.honk_and_flash()
 
 
 class VolvoHonkButton(VolvoEntity, ButtonEntity):
@@ -56,7 +56,7 @@ class VolvoHonkButton(VolvoEntity, ButtonEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
 
     async def async_press(self) -> None:
-        await self.coordinator.data[self.idx].honk()
+        await self.vehicle.honk()
 
 
 class VolvoSignInButton(VolvoEntity, ButtonEntity):
@@ -66,4 +66,4 @@ class VolvoSignInButton(VolvoEntity, ButtonEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
 
     async def async_press(self) -> None:
-        await self.coordinator.data[self.idx].sign_in()
+        await self.vehicle.sign_in()
