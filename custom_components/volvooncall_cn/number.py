@@ -51,16 +51,18 @@ class VolovEngineDurationNumInput(VolvoEntity, NumberEntity):
 
     @cached_property
     def native_value(self):
-       store_data = self.coordinator.store_datas[self.idx]
-       return store_data.get_engine_duration_number()
+        store_data = self._get_store()
+        return store_data.get_engine_duration_number() if store_data else None
 
     @property
     def state(self):
-        store_data = self.coordinator.store_datas[self.idx]
-        return store_data.get_engine_duration_number()
+        store_data = self._get_store()
+        return store_data.get_engine_duration_number() if store_data else None
 
     async def async_set_native_value(self, value):
-        store_data = self.coordinator.store_datas[self.idx]
+        store_data = self._get_store()
+        if store_data is None:
+            return
         await store_data.set_engine_duration_number(value)
         await self.coordinator.async_refresh()
 
@@ -79,10 +81,13 @@ class VolvoChargeLimitNumber(VolvoEntity, NumberEntity):
 
     @property
     def native_value(self):
-        return self.coordinator.store_datas[self.idx].get_charge_limit()
+        store_data = self._get_store()
+        return store_data.get_charge_limit() if store_data else None
 
     async def async_set_native_value(self, value):
-        store_data = self.coordinator.store_datas[self.idx]
+        store_data = self._get_store()
+        if store_data is None:
+            return
         await store_data.set_charge_limit(value)
         self.async_write_ha_state()
         # A lowered limit may already be reached; re-poll so the coordinator

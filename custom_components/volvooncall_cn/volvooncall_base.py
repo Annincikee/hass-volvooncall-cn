@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 import math
 
-from aiohttp import ClientSession, ClientTimeout, ClientSession
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 from aiohttp.hdrs import METH_GET, METH_POST
 
 import hashlib
@@ -41,10 +41,35 @@ MIN_SCAN_INTERVAL = 30
 CHARGE_PILE_CACHE_TTL = 15
 CHARGE_ORDER_CACHE_TTL = 30 * 60
 
+# Frequent password logins can trip Volvo's server-side risk control (the
+# observed symptom is a long streak of 403s shortly after login), so repeat
+# attempts are locally rate limited.
+PASSWORD_LOGIN_COOLDOWN = 120
+
+# Refresh the access token once it has less than this much lifetime left.
+TOKEN_REFRESH_HEADROOM = 60 * 10
+
 
 class VolvoAPIError(Exception):
     def __init__(self, message):
+        super().__init__(message)
         self.message = message
+
+
+class VolvoApiHttpError(VolvoAPIError):
+    """Deterministic (non-auth) HTTP failure; retrying cannot help."""
+
+
+class VolvoAuthExpiredError(VolvoAPIError):
+    """The server rejected our access token (401/403) before its expiry."""
+
+
+class VolvoAuthError(VolvoAPIError):
+    """The auth endpoint answered but rejected the account credentials."""
+
+
+class VolvoAuthThrottledError(VolvoAPIError):
+    """A password login was suppressed by the local risk-control cooldown."""
 
 
 def redact_sensitive(value):
@@ -113,8 +138,49 @@ class VehicleBaseAPI:
         self._digitalvolvo_x_token = ""
         self._vocapi_access_token = ""
         self._access_token_expire_at = 0
+        self._last_password_login_at = 0
+        self._token_listener = None
         self._charge_piles_cache = {}
         self._charge_order_cache = {}
+
+    def set_token_listener(self, listener):
+        """Register a callback invoked with export_tokens() after each auth."""
+        self._token_listener = listener
+
+    def export_tokens(self):
+        """Return the session tokens for persistence across restarts."""
+        return {
+            "refresh_token": self._refresh_token,
+            "digitalvolvo_access_token": self._digitalvolvo_access_token,
+            "digitalvolvo_x_token": self._digitalvolvo_x_token,
+            "vocapi_access_token": self._vocapi_access_token,
+            "access_token_expire_at": self._access_token_expire_at,
+        }
+
+    def import_tokens(self, data):
+        """Seed the session from persisted tokens to avoid a password login."""
+        if not isinstance(data, dict):
+            return
+        self._refresh_token = data.get("refresh_token") or ""
+        self._digitalvolvo_access_token = (
+            data.get("digitalvolvo_access_token") or ""
+        )
+        self._digitalvolvo_x_token = data.get("digitalvolvo_x_token") or ""
+        self._vocapi_access_token = data.get("vocapi_access_token") or ""
+        try:
+            self._access_token_expire_at = int(
+                data.get("access_token_expire_at") or 0
+            )
+        except (TypeError, ValueError):
+            self._access_token_expire_at = 0
+
+    def _notify_token_listener(self):
+        if self._token_listener is None:
+            return
+        try:
+            self._token_listener(self.export_tokens())
+        except Exception as err:
+            _LOGGER.debug("Token listener failed: %s", redact_sensitive(err))
 
     async def _request_digitalvolvo(
         self, method, url, headers, *, max_attempts=MAX_RETRIES, **kwargs
@@ -143,7 +209,7 @@ class VehicleBaseAPI:
                         method,
                         url,
                         headers=final_headers,
-                        timeout=ClientTimeout(total=TIMEOUT.seconds),
+                        timeout=ClientTimeout(total=TIMEOUT.total_seconds()),
                         **kwargs
                 ) as response:
                     response.raise_for_status()
@@ -158,6 +224,36 @@ class VehicleBaseAPI:
             except VolvoAPIError:
                 # Business rejections are deterministic and must not be replayed.
                 raise
+            except ClientResponseError as error:
+                # NEVER log these with exc_info or re-raise them as-is: the
+                # exception carries the full request URL, and the refreshToken
+                # endpoint embeds the token in its query string. Every path
+                # below logs and raises a redacted copy only ("from None"
+                # detaches the token-bearing original from the chain).
+                safe_message = redact_sensitive(error)
+                if error.status in (401, 403):
+                    # The server revoked this session ahead of its expiry.
+                    # Mark the access token dead so the next auth pass rebuilds
+                    # the session instead of replaying a rejected token.
+                    self._access_token_expire_at = 0
+                    _LOGGER.warning(
+                        "Authentication rejected by server: %s", safe_message
+                    )
+                    raise VolvoAuthExpiredError(safe_message) from None
+                if 400 <= error.status < 500 and error.status != 429:
+                    # Deterministic client errors do not become successes on
+                    # replay; retrying only hammers the API.
+                    _LOGGER.warning(
+                        "Request rejected by server: %s", safe_message
+                    )
+                    raise VolvoApiHttpError(safe_message) from None
+                _LOGGER.warning(
+                    "Transient server error from the API: %s", safe_message
+                )
+                if i < max_attempts - 1:
+                    await asyncio.sleep(2**i)  # Exponential backoff
+                else:
+                    raise VolvoApiHttpError(safe_message) from None
             except Exception as error:
                 _LOGGER.warning(
                     "Failure when communicating with the server (%s): %s",
@@ -185,43 +281,89 @@ class VehicleBaseAPI:
             json=data,
         )
 
+    def _store_session(self, data, now):
+        self._refresh_token = data["refreshToken"]
+        self._vocapi_access_token = data["globalAccessToken"]
+        self._digitalvolvo_access_token = data["accessToken"]
+        self._digitalvolvo_x_token = data["jwtToken"]
+        self._access_token_expire_at = now + int(data["expiresIn"])
+        self._notify_token_listener()
+
+    async def _refresh_access_token(self):
+        url = urljoin(
+            DIGITALVOLVO_URL,
+            "/app/iam/api/v1/refreshToken?refreshToken=" + self._refresh_token,
+        )
+        result = await self.digitalvolvo_get(url, {})
+        self._store_session(result["data"], int(time.time()))
+
     async def login(self):
         now = int(time.time())
 
         # A live session is kept fresh by update_token() using the refresh
-        # token. Only fall back to a full password login when there is no
-        # usable session to refresh (first auth, or a fully expired token
-        # whose refresh token is assumed dead as well).
+        # token; nothing to do here.
         if self._refresh_token and (self._access_token_expire_at - now) > 0:
             return
 
+        # An expired session that still has a refresh token (e.g. tokens
+        # persisted across a restart, or a session the server revoked early)
+        # is recovered through the refresh endpoint first — a password login
+        # is the last resort because frequent password logins can trip
+        # server-side risk control.
+        if self._refresh_token:
+            try:
+                await self._refresh_access_token()
+                return
+            except Exception as err:
+                _LOGGER.warning(
+                    "Token refresh failed, re-authenticating with password: %s",
+                    redact_sensitive(err),
+                )
+                self._refresh_token = ""
+                self._access_token_expire_at = 0
+
+        now = int(time.time())
+        if (now - self._last_password_login_at) < PASSWORD_LOGIN_COOLDOWN:
+            raise VolvoAuthThrottledError(
+                "Password login suppressed for up to "
+                f"{PASSWORD_LOGIN_COOLDOWN}s to avoid account risk control"
+            )
+        # Failed attempts count too; hammering the auth endpoint with a
+        # rejected password is exactly what risk control punishes.
+        self._last_password_login_at = now
+
         url = urljoin(DIGITALVOLVO_URL, "/app/iam/api/v1/auth")
-        result = await self.digitalvolvo_post(url, {}, {
-            "authType": "password",
-            "password": self._password,
-            "phoneNumber": "0086" + self._username
-        })
+        try:
+            result = await self.digitalvolvo_post(url, {}, {
+                "authType": "password",
+                "password": self._password,
+                "phoneNumber": "0086" + self._username
+            })
+        except (VolvoAuthExpiredError, VolvoApiHttpError):
+            # Transport-level failures are not a verdict on the credentials.
+            raise
+        except VolvoAPIError as err:
+            # The auth endpoint answered and rejected the credentials.
+            raise VolvoAuthError(
+                f"Login rejected by server: {err.message}"
+            ) from None
 
         if not result:
             raise VolvoAPIError("Login returned no response")
 
         if not result.get("success"):
-            raise VolvoAPIError(
+            raise VolvoAuthError(
                 f"Login rejected by server: {result.get('errMsg') or result.get('msg')}"
             )
 
-        if not result.get("data", {}).get("globalAccessToken"):
+        data = result.get("data") or {}
+        if not data.get("globalAccessToken"):
             raise VolvoAPIError("Login succeeded but no globalAccessToken was returned")
 
-        if not result["data"].get("accessToken"):
+        if not data.get("accessToken"):
             raise VolvoAPIError("Login succeeded but no accessToken was returned")
 
-        self._refresh_token = result["data"]["refreshToken"]
-        self._vocapi_access_token = result["data"]["globalAccessToken"]
-        self._digitalvolvo_access_token = result["data"]["accessToken"]
-        self._digitalvolvo_x_token = result["data"]["jwtToken"]
-        now = int(time.time())
-        self._access_token_expire_at = now + int(result["data"]["expiresIn"])
+        self._store_session(data, int(time.time()))
 
     async def update_token(self):
         now = int(time.time())
@@ -233,18 +375,11 @@ class VehicleBaseAPI:
             return
 
         # Access token still has comfortable headroom; nothing to refresh.
-        if (self._access_token_expire_at - now) >= 60 * 10:
+        if (self._access_token_expire_at - now) >= TOKEN_REFRESH_HEADROOM:
             return
 
-        url = urljoin(DIGITALVOLVO_URL, "/app/iam/api/v1/refreshToken?refreshToken=" + self._refresh_token)
-
         try:
-            result = await self.digitalvolvo_get(url, {})
-            self._refresh_token = result["data"]["refreshToken"]
-            self._vocapi_access_token = result["data"]["globalAccessToken"]
-            self._digitalvolvo_access_token = result["data"]["accessToken"]
-            self._digitalvolvo_x_token = result["data"]["jwtToken"]
-            self._access_token_expire_at = now + int(result["data"]["expiresIn"])
+            await self._refresh_access_token()
         except Exception as err:
             # The refresh token has itself expired or been revoked; drop it and
             # recover with a full password login.

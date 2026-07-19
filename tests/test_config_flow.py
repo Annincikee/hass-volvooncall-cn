@@ -363,6 +363,71 @@ class TestEdgeCases:
         assert result["errors"]["base"] == "missing_credentials"
 
     @pytest.mark.asyncio
+    async def test_reauth_flow_updates_password(self, hass: HomeAssistant):
+        """The reauth flow must accept a new password and update the entry."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: "old_password",
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            unique_id=TEST_USERNAME,
+            version=3,
+        )
+        config_entry.add_to_hass(hass)
+
+        result = await config_entry.start_reauth_flow(hass)
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["step_id"] == "reauth_confirm"
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            return_value={},
+        ), patch.object(
+            hass.config_entries, "async_reload", new_callable=AsyncMock
+        ):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_PASSWORD: "new_password"},
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.ABORT
+        assert result["reason"] == "reauth_successful"
+        assert config_entry.data[CONF_PASSWORD] == "new_password"
+
+    @pytest.mark.asyncio
+    async def test_reauth_flow_rejects_bad_password(self, hass: HomeAssistant):
+        """A rejected password re-renders the reauth form with the error."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: "old_password",
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            unique_id=TEST_USERNAME,
+            version=3,
+        )
+        config_entry.add_to_hass(hass)
+
+        result = await config_entry.start_reauth_flow(hass)
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            return_value={"base": "用户名或密码错误"},
+        ):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_PASSWORD: "still_wrong"},
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["step_id"] == "reauth_confirm"
+        assert result["errors"]["base"] == "用户名或密码错误"
+        assert config_entry.data[CONF_PASSWORD] == "old_password"
+
+    @pytest.mark.asyncio
     async def test_empty_password(self, hass: HomeAssistant):
         """Empty password re-renders the form with a field error, not a crash."""
         result = await hass.config_entries.flow.async_init(

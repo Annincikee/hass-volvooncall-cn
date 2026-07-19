@@ -4,9 +4,12 @@
 # cleanup checks which fail if *any* non-whitelisted thread is left running.
 # grpcio starts a background "safe shutdown" thread ("_run_safe_shutdown_loop")
 # once grpc is imported/initialized, and it is intentionally long-lived.
+# grpc.aio additionally starts one process-wide completion-queue poller
+# thread ("_poll_wrapper") when the first aio channel is created; it is a
+# singleton that outlives individual channels by design.
 #
-# For this integration we allow that thread in tests by filtering it out of
-# threading.enumerate(), so the cleanup plugin doesn't treat it as a leak.
+# For this integration we allow those threads in tests by filtering them out
+# of threading.enumerate(), so the cleanup plugin doesn't treat them as leaks.
 
 import sys
 import threading
@@ -28,6 +31,7 @@ def pytest_configure(config):
             t
             for t in threads
             if "_run_safe_shutdown_loop" not in getattr(t, "name", "")
+            and "_poll_wrapper" not in getattr(t, "name", "")
         ]
 
     threading.enumerate = filtered_enumerate

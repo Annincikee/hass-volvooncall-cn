@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.device_tracker.config_entry import TrackerEntity
+from homeassistant.components.device_tracker import TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -39,9 +39,15 @@ class VolvoSensor(VolvoEntity, TrackerEntity):
     @property
     def latitude(self):
         """Handle updated data from the coordinator."""
-        return self.coordinator.data[self.idx].get(self.metaMapKey)["latitude"]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
+        return vehicle.get(self.metaMapKey)["latitude"]
 
     @property
     def longitude(self):
         """Handle updated data from the coordinator."""
-        return self.coordinator.data[self.idx].get(self.metaMapKey)["longitude"]
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
+        return vehicle.get(self.metaMapKey)["longitude"]
