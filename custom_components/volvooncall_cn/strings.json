@@ -137,9 +137,6 @@
                     }
                 }
             },
-            "climatization_switch": {
-                "name": "{nickname} Climatization"
-            },
             "tail_gate_switch": {
                 "name": "{nickname} Tailgate control"
             },
@@ -165,6 +162,9 @@
             },
             "app_sign_in_button": {
                 "name": "{nickname} App daily check-in"
+            },
+            "climatization_button": {
+                "name": "{nickname} Climatization"
             }
         },
         "number": {

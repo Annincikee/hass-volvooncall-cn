@@ -137,9 +137,6 @@
                     }
                 }
             },
-            "climatization_switch": {
-                "name": "{nickname}温度调节"
-            },
             "tail_gate_switch": {
                 "name": "{nickname}尾箱控制"
             },
@@ -165,6 +162,9 @@
             },
             "app_sign_in_button": {
                 "name": "{nickname}App 每日签到"
+            },
+            "climatization_button": {
+                "name": "{nickname}温度调节"
             }
         },
         "number": {

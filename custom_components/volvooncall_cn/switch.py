@@ -3,7 +3,6 @@ import asyncio
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_call_later
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import Platform
 from homeassistant.exceptions import HomeAssistantError
@@ -13,20 +12,6 @@ from .volvooncall_cn import DOMAIN
 from .volvooncall_base import MAX_RETRIES
 
 _LOGGER = logging.getLogger(__name__)
-
-CLIMATIZATION_DEFAULT_RUNTIME = 3 * 60
-CLIMATIZATION_CHARGING_RUNTIME = 30 * 60
-CLIMATIZATION_CONNECTED_STATES = {
-    "connected_ac",
-    "connected_dc",
-    "plugged_in",
-    "charging",
-}
-CLIMATIZATION_CHARGING_STATES = {
-    "charging",
-    "scheduled",
-    "smart_charging",
-}
 
 
 async def async_setup_entry(
@@ -40,9 +25,6 @@ async def async_setup_entry(
     switchs = []
     for idx, ent in enumerate(coordinator.data):
         switchs.append(VolvoEngineSwitch(coordinator, idx, "engine_switch"))
-        switchs.append(
-            VolvoClimatizationSwitch(coordinator, idx, "climatization_switch")
-        )
         if ent.get("isAaos"):
             switchs.append(VolvoTailgateSwitch(coordinator, idx, "tail_gate_switch"))
             switchs.append(VolvoSunroofSwitch(coordinator, idx, "sunroof_switch"))
@@ -104,77 +86,6 @@ class VolvoEngineSwitch(VolvoSwitchEntity):
             "remote_start_at": data.get("engine_remote_start_time"),
             "remote_end_at": data.get("engine_remote_end_time")
         }
-
-
-class VolvoClimatizationSwitch(VolvoEntity, SwitchEntity):
-    """Optimistic parked-climatization control with local auto-off."""
-
-    _attr_assumed_state = True
-
-    def __init__(self, coordinator, idx, metaKey):
-        super().__init__(coordinator, idx, metaKey, Platform.SWITCH)
-        self._attr_is_on = False
-        self._cancel_auto_off = None
-
-    def _cancel_auto_off_timer(self):
-        if self._cancel_auto_off is None:
-            return
-        self._cancel_auto_off()
-        self._cancel_auto_off = None
-
-    def _is_charger_connected(self):
-        vehicle = self.vehicle
-        if vehicle is None:
-            return False
-        connection_status = str(
-            vehicle.get("charger_connection_status") or ""
-        ).lower()
-        charging_status = str(
-            vehicle.get("battery_charging_status") or ""
-        ).lower()
-        charging_power = vehicle.get("charging_power")
-
-        if connection_status in CLIMATIZATION_CONNECTED_STATES:
-            return True
-        if charging_status in CLIMATIZATION_CHARGING_STATES:
-            return True
-        if isinstance(charging_power, (int, float)) and charging_power > 0:
-            return True
-        return False
-
-    def _auto_off_delay(self):
-        if self._is_charger_connected():
-            return CLIMATIZATION_CHARGING_RUNTIME
-        return CLIMATIZATION_DEFAULT_RUNTIME
-
-    def _schedule_auto_off(self):
-        self._cancel_auto_off_timer()
-
-        def _turn_off_state(_now):
-            self._cancel_auto_off = None
-            self._attr_is_on = False
-            self.async_write_ha_state()
-
-        self._cancel_auto_off = async_call_later(
-            self.hass,
-            self._auto_off_delay(),
-            _turn_off_state,
-        )
-
-    async def async_turn_on(self) -> None:
-        await self.vehicle.climatization_start()
-        self._attr_is_on = True
-        self._schedule_auto_off()
-        self.async_write_ha_state()
-
-    async def async_turn_off(self) -> None:
-        await self.vehicle.climatization_stop()
-        self._cancel_auto_off_timer()
-        self._attr_is_on = False
-        self.async_write_ha_state()
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._cancel_auto_off_timer()
 
 
 class VolvoTailgateSwitch(VolvoSwitchEntity):

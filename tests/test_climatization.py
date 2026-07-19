@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import custom_components.volvooncall_cn.switch as switch_module
+from custom_components.volvooncall_cn.button import VolvoClimatizationButton
 import custom_components.volvooncall_cn.volvooncall_cn as volvo_module
 from custom_components.volvooncall_cn.proto.invocation_pb2 import (
     ClimatizationStartReq,
@@ -12,11 +12,6 @@ from custom_components.volvooncall_cn.proto.invocation_pb2 import (
     invocationCommResp,
     invocationData,
     invocationStatus,
-)
-from custom_components.volvooncall_cn.switch import (
-    CLIMATIZATION_CHARGING_RUNTIME,
-    CLIMATIZATION_DEFAULT_RUNTIME,
-    VolvoClimatizationSwitch,
 )
 from custom_components.volvooncall_cn.volvooncall_cn import Vehicle, VehicleAPI
 
@@ -111,98 +106,15 @@ async def test_vehicle_climatization_methods_delegate_without_duration():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    (
-        "connection_status",
-        "charging_status",
-        "charging_power",
-        "expected_delay",
-    ),
-    [
-        (None, None, None, CLIMATIZATION_DEFAULT_RUNTIME),
-        ("connected_ac", "idle", 0, CLIMATIZATION_CHARGING_RUNTIME),
-        ("plugged_in", "idle", 0, CLIMATIZATION_CHARGING_RUNTIME),
-        ("disconnected", "charging", 0, CLIMATIZATION_CHARGING_RUNTIME),
-        ("disconnected", "idle", 3.6, CLIMATIZATION_CHARGING_RUNTIME),
-    ],
-)
-async def test_climatization_switch_schedules_local_auto_off(
-    monkeypatch,
-    connection_status,
-    charging_status,
-    charging_power,
-    expected_delay,
-):
+async def test_climatization_button_press_starts_climatization():
+    """Climatization is a momentary press, like the honk button: it only starts."""
     api = MagicMock()
     api.climatization_control = AsyncMock()
     vehicle = Vehicle("TEST_VIN", api, True)
-    vehicle.charger_connection_status = connection_status
-    vehicle.battery_charging_status = charging_status
-    vehicle.charging_power = charging_power
     coordinator = MagicMock()
     coordinator.data = [vehicle]
-    switch = VolvoClimatizationSwitch(
-        coordinator, 0, "climatization_switch"
-    )
-    switch._hass = MagicMock()
-    switch.async_write_ha_state = MagicMock()
-    scheduled = {}
+    button = VolvoClimatizationButton(coordinator, 0, "climatization_button")
 
-    def fake_async_call_later(hass, delay, action):
-        scheduled["hass"] = hass
-        scheduled["delay"] = delay
-        scheduled["action"] = action
-        scheduled["cancel"] = MagicMock()
-        return scheduled["cancel"]
+    await button.async_press()
 
-    monkeypatch.setattr(
-        switch_module, "async_call_later", fake_async_call_later
-    )
-
-    await switch.async_turn_on()
-
-    assert switch.is_on is True
-    assert scheduled["delay"] == expected_delay
     api.climatization_control.assert_awaited_once_with("TEST_VIN", True)
-
-    scheduled["action"](None)
-
-    assert switch.is_on is False
-    assert switch.async_write_ha_state.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_climatization_switch_turn_off_cancels_local_auto_off(
-    monkeypatch,
-):
-    api = MagicMock()
-    api.climatization_control = AsyncMock()
-    vehicle = Vehicle("TEST_VIN", api, True)
-    coordinator = MagicMock()
-    coordinator.data = [vehicle]
-    switch = VolvoClimatizationSwitch(
-        coordinator, 0, "climatization_switch"
-    )
-    switch._hass = MagicMock()
-    switch.async_write_ha_state = MagicMock()
-    cancel = MagicMock()
-
-    monkeypatch.setattr(
-        switch_module,
-        "async_call_later",
-        lambda hass, delay, action: cancel,
-    )
-
-    await switch.async_turn_on()
-    await switch.async_turn_off()
-
-    assert switch.is_on is False
-    cancel.assert_called_once()
-    assert api.climatization_control.await_args_list[0].args == (
-        "TEST_VIN",
-        True,
-    )
-    assert api.climatization_control.await_args_list[1].args == (
-        "TEST_VIN",
-        False,
-    )
