@@ -113,7 +113,6 @@ show_controls: true
 | `binary_sensor.{vin}_engine` | 引擎 | |
 | `switch.{vin}_engine_remote_control` | 远程启动 | 远程启动 & 空调 |
 | `number.{vin}_engine_duration` | 远程启动持续时长 | 单位分钟，默认 5 分钟 |
-| `switch.{vin}_climatization` | 温度调节 | 仅开启/关闭驻车空调，不启动车辆，不设置运行时长 |
 | `sensor.{vin}_distance_to_empty` | 续航里程 | |
 | `binary_sensor.{vin}_front_left_door` | 前左门 | 表示门是否打开 |
 | `binary_sensor.{vin}_front_right_door` | 前右门 | |
@@ -134,6 +133,7 @@ show_controls: true
 | `button.{vin}_flash` | 闪灯 | |
 | `button.{vin}_honk_and_flash` | 闪灯鸣笛 | |
 | `button.{vin}_honk` | 鸣笛 | |
+| `button.{vin}_climatization` | 温度调节 | 按下即开启驻车空调，不启动车辆，到时自动停止 |
 | `switch.{vin}_sunroof_control` | 远程控制天窗 | 仅在遮阳帘已打开时支持远程打开天窗（新款车型支持） |
 | `switch.{vin}_tailgate_control` | 远程控制尾箱 | 打开尾箱会同时解锁车辆,请注意及时锁车（新款车型支持） |
 | `sensor.{vin}_fuel_average_consumption_liters_per_100_km` | 百公里油耗 | |

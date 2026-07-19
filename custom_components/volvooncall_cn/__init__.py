@@ -877,7 +877,7 @@ metaMap = {
         "unit": "",
         "entity_id": "engine_remote_control",
     },
-    "climatization_switch": {
+    "climatization_button": {
         "name": "Climatization",
         "device_class": None,
         "icon": "mdi:air-conditioner",
