@@ -21,6 +21,8 @@ from custom_components.volvooncall_cn import (
     VEHICLE_ABSENCE_GRACE_CYCLES,
     VolvoCoordinator,
     _card_resources,
+    async_confirm_vehicle_state,
+    async_refresh_after_control,
 )
 from custom_components.volvooncall_cn.store import VolvoStore, store_key_for
 from custom_components.volvooncall_cn.volvooncall_base import (
@@ -100,6 +102,126 @@ async def test_concurrent_forced_refreshes_both_fetch(hass: HomeAssistant):
 
     assert vehicle.update.await_count == 3  # seed + both forced polls
     assert coordinator._pending_force_refreshes == 0
+
+
+async def test_control_confirmation_timeout_removes_its_queued_token(
+    hass: HomeAssistant, monkeypatch
+):
+    """Cancellation while waiting to refresh must not leak a force token."""
+    coordinator = _coordinator(hass)
+    never_finishes = asyncio.Event()
+
+    async def blocked_refresh():
+        await never_finishes.wait()
+
+    coordinator.async_refresh = AsyncMock(side_effect=blocked_refresh)
+    monkeypatch.setattr(
+        "custom_components.volvooncall_cn."
+        "CONTROL_CONFIRMATION_TIMEOUT",
+        0.01,
+    )
+
+    with pytest.raises(HomeAssistantError, match="could not be confirmed"):
+        await async_confirm_vehicle_state(
+            coordinator,
+            lambda: False,
+            retry_delay=0,
+            description="Test control",
+        )
+
+    assert coordinator._pending_force_refreshes == 0
+    assert coordinator._force_refresh_tokens == []
+
+
+async def test_force_refresh_reports_false_when_coordinator_is_shutting_down(
+    hass: HomeAssistant,
+):
+    """A no-op refresh must not confirm a cached pre-command value."""
+    coordinator = _coordinator(hass)
+    coordinator._shutdown_requested = True
+
+    assert await coordinator.async_force_refresh() is False
+    assert coordinator._pending_force_refreshes == 0
+
+
+async def test_control_confirmation_retries_after_transport_failure():
+    """One transient failed poll must not consume all confirmation attempts."""
+    coordinator = MagicMock()
+    coordinator.async_force_refresh = AsyncMock(
+        side_effect=[False, True]
+    )
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await async_confirm_vehicle_state(
+            coordinator,
+            lambda: True,
+            retry_delay=0,
+            description="Test control",
+        )
+
+    assert coordinator.async_force_refresh.await_count == 2
+
+
+async def test_control_confirmation_requires_current_source_generation():
+    """An optimistic value needs source data from a post-command poll."""
+    coordinator = MagicMock()
+    generation = [7]
+    calls = 0
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            generation[0] += 1
+        return True
+
+    coordinator.async_force_refresh = AsyncMock(side_effect=refresh)
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await async_confirm_vehicle_state(
+            coordinator,
+            lambda: True,
+            retry_delay=0,
+            description="Test control",
+            source_is_fresh=lambda: True,
+            source_generation=lambda: tuple(generation),
+        )
+
+    assert coordinator.async_force_refresh.await_count == 2
+
+
+async def test_control_confirmation_rejects_stale_matching_state():
+    """A missing vehicle must not confirm from historical source health."""
+    coordinator = MagicMock()
+    coordinator.async_force_refresh = AsyncMock(return_value=True)
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(
+            HomeAssistantError, match="could not be confirmed"
+        ):
+            await async_confirm_vehicle_state(
+                coordinator,
+                lambda: True,
+                retry_delay=0,
+                description="Test control",
+                source_is_fresh=lambda: True,
+                source_generation=lambda: (3,),
+            )
+
+    assert (
+        coordinator.async_force_refresh.await_count
+        == 3
+    )
+
+
+async def test_post_control_refresh_surfaces_transport_failure():
+    coordinator = MagicMock()
+    coordinator.async_force_refresh = AsyncMock(return_value=False)
+
+    with pytest.raises(HomeAssistantError, match="could not be retrieved"):
+        await async_refresh_after_control(
+            coordinator,
+            description="Test setting",
+        )
 
 
 async def test_throttled_refresh_does_not_resurrect_failed_entities(
@@ -326,6 +448,41 @@ async def test_legacy_vin_named_store_is_migrated(hass: HomeAssistant):
     store._legacy_store.async_remove.assert_awaited_once()
 
 
+async def test_legacy_store_read_error_does_not_log_vin(
+    hass: HomeAssistant, caplog
+):
+    """Exception strings can contain the legacy plaintext storage path."""
+    store = VolvoStore(hass, VIN)
+    store._legacy_store.async_load = AsyncMock(
+        side_effect=OSError(f"/config/.storage/volvooncall_cn.{VIN}")
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await store._async_migrate_legacy() is None
+
+    assert VIN not in caplog.text
+    assert "OSError" in caplog.text
+
+
+async def test_legacy_store_remove_error_does_not_log_vin(
+    hass: HomeAssistant, caplog
+):
+    """A successful migration stays usable if deleting the old path fails."""
+    payload = {"engine_duration_number": 9}
+    store = VolvoStore(hass, VIN)
+    store.async_save = AsyncMock()
+    store._legacy_store.async_load = AsyncMock(return_value=payload)
+    store._legacy_store.async_remove = AsyncMock(
+        side_effect=OSError(f"/config/.storage/volvooncall_cn.{VIN}")
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await store._async_migrate_legacy() == payload
+
+    assert VIN not in caplog.text
+    assert "OSError" in caplog.text
+
+
 async def test_invocation_responses_are_not_logged_verbatim():
     """invocationData carries vin and deviceid; debug logs must be redacted."""
     source = (
@@ -372,34 +529,53 @@ async def test_real_location_is_still_converted():
     assert abs(vehicle.position_wgs84["latitude"] - 31.2304) < 0.01
 
 
-async def test_slow_moving_sources_are_not_polled_every_cycle():
+@pytest.mark.parametrize("source", ["health", "odometer", "preference"])
+async def test_slow_moving_sources_are_not_polled_every_cycle(source):
     """Nickname and health data do not need a request every 30 seconds."""
     vehicle = Vehicle(VIN, AsyncMock(), isAaos=True, supports_electric=False)
 
     # First cycle always runs so entities populate at setup.
-    assert vehicle._should_refresh("preference") is True
+    assert vehicle._should_refresh(source) is True
 
-    vehicle._cache["preference"] = {}
+    vehicle._cache[source] = {}
     vehicle._poll_cycle = 1
-    assert vehicle._should_refresh("preference") is False
-    vehicle._poll_cycle = SOURCE_REFRESH_EVERY_CYCLES["preference"]
-    assert vehicle._should_refresh("preference") is True
+    assert vehicle._should_refresh(source) is False
+    vehicle._poll_cycle = SOURCE_REFRESH_EVERY_CYCLES[source]
+    assert vehicle._should_refresh(source) is True
 
     # Sources with no entry stay on every cycle.
     assert vehicle._should_refresh("exterior") is True
 
 
+@pytest.mark.parametrize("source", ["health", "odometer", "preference"])
+async def test_failed_slow_source_retries_on_the_next_cycle(source):
+    """Cadence throttling must not defer recovery from a source failure."""
+    vehicle = Vehicle(VIN, AsyncMock(), isAaos=True, supports_electric=False)
+    vehicle._cache[source] = {"cached": True}
+    vehicle._poll_cycle = 1
+    vehicle._data_source_status[source] = False
+
+    assert vehicle._should_refresh(source) is True
+
+    vehicle._data_source_status[source] = True
+    assert vehicle._should_refresh(source) is False
+
+
 async def test_vehicle_info_is_reused_instead_of_refetched():
-    """update() must not repeat the listBindCar call the coordinator made."""
+    """Missing names must not trigger a duplicate listBindCar request."""
     api = AsyncMock()
-    api.get_vehicles = AsyncMock()
+    api.get_channel = AsyncMock()
+    api.get_vehicles = AsyncMock(return_value=[{"vinCode": VIN}])
     vehicle = Vehicle(VIN, api, isAaos=True, supports_electric=False)
+    vehicle._should_refresh = MagicMock(return_value=False)
 
-    vehicle.apply_vehicle_info({"seriesName": "XC60", "modelName": "B5"})
+    vehicle.apply_vehicle_info({"vinCode": VIN})
+    await vehicle.update()
 
-    assert vehicle.series_name == "XC60"
-    assert vehicle.model_name == "B5"
+    assert vehicle.series_name == ""
+    assert vehicle.model_name == ""
     api.get_vehicles.assert_not_awaited()
+    api.get_channel.assert_awaited_once()
 
 
 async def test_invocation_failures_raise_home_assistant_error():
@@ -514,3 +690,35 @@ async def test_manifest_does_not_require_grpcio_tools():
     assert not any(
         req.startswith("grpcio-tools") for req in manifest["requirements"]
     )
+
+
+async def test_manifest_declares_generated_protobuf_runtime():
+    """Generated modules need protobuf itself, not only grpcio."""
+    import json
+    import pathlib
+    import re
+
+    component = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "volvooncall_cn"
+    )
+    requirements = json.loads(
+        (component / "manifest.json").read_text(encoding="utf-8")
+    )["requirements"]
+
+    generated_versions = set()
+    for path in (component / "proto").glob("*_pb2.py"):
+        match = re.search(
+            r"^# Protobuf Python Version: ([0-9.]+)$",
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        assert match, f"{path.name} has no protobuf generator version"
+        generated_versions.add(match.group(1))
+
+    required = max(
+        generated_versions,
+        key=lambda value: tuple(map(int, value.split("."))),
+    )
+    assert f"protobuf>={required}" in requirements

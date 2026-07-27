@@ -2,14 +2,16 @@ import hashlib
 import logging
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.lovelace import LOVELACE_DATA
 from homeassistant.components.lovelace.const import MODE_STORAGE
-from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -19,7 +21,6 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import slugify
 
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
@@ -76,6 +77,11 @@ UPDATE_CYCLE_TIMEOUT = 150
 # Upper bound on queued forced refreshes, so a burst of control commands
 # cannot pile up an unbounded backlog of real polls.
 MAX_PENDING_FORCE_REFRESHES = 8
+# A control command must never wait for the coordinator's full 150-second
+# update budget multiple times. The command has already been accepted at this
+# point; this shorter deadline only bounds the follow-up state confirmation.
+CONTROL_CONFIRMATION_TIMEOUT = 30
+CONTROL_CONFIRMATION_ATTEMPTS = 3
 # Consecutive failed charge-limit stop attempts before backing off. Without
 # this the coordinator re-sends the stop every poll forever, one warning and
 # one extra REST round trip each time.
@@ -91,6 +97,97 @@ TOKEN_SAVE_DELAY_SECONDS = 5
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 FRONTEND_URL_PATH = f"/{DOMAIN}/frontend"
 CARD_FILENAMES = ("volvo-car-card.js", "volvo-charging-card.js")
+
+
+async def async_confirm_vehicle_state(
+    coordinator,
+    state_matches: Callable[[], bool],
+    *,
+    retry_delay: float,
+    description: str,
+    source_is_fresh: Callable[[], bool] | None = None,
+    source_generation: Callable[[], object] | None = None,
+) -> None:
+    """Force bounded polls until a control command's state is visible."""
+    initial_generation = (
+        source_generation() if source_generation is not None else None
+    )
+    try:
+        async with asyncio.timeout(CONTROL_CONFIRMATION_TIMEOUT):
+            for _ in range(CONTROL_CONFIRMATION_ATTEMPTS):
+                await asyncio.sleep(retry_delay)
+                refresh_succeeded = await coordinator.async_force_refresh()
+                if not refresh_succeeded:
+                    continue
+                if source_is_fresh is not None and not source_is_fresh():
+                    continue
+                if (
+                    source_generation is not None
+                    and source_generation() == initial_generation
+                ):
+                    continue
+                if state_matches():
+                    return
+    except TimeoutError:
+        pass
+
+    raise HomeAssistantError(
+        f"{description} command was sent but the requested state "
+        "could not be confirmed"
+    )
+
+
+async def async_refresh_after_control(
+    coordinator,
+    *,
+    description: str,
+    source_is_fresh: Callable[[], bool] | None = None,
+    source_generation: Callable[[], object] | None = None,
+) -> None:
+    """Run one bounded post-control refresh."""
+    initial_generation = (
+        source_generation() if source_generation is not None else None
+    )
+    try:
+        async with asyncio.timeout(CONTROL_CONFIRMATION_TIMEOUT):
+            refresh_succeeded = await coordinator.async_force_refresh()
+    except TimeoutError as err:
+        raise HomeAssistantError(
+            f"{description} was saved, but the immediate vehicle refresh "
+            "timed out"
+        ) from err
+    if not refresh_succeeded or (
+        source_is_fresh is not None and not source_is_fresh()
+    ) or (
+        source_generation is not None
+        and source_generation() == initial_generation
+    ):
+        raise HomeAssistantError(
+            f"{description} was saved, but fresh vehicle data could not "
+            "be retrieved"
+        )
+
+
+def vehicle_sources_are_fresh(vehicle, *sources: str) -> bool:
+    """Return whether a control's target vehicle sources refreshed cleanly."""
+    return bool(
+        vehicle is not None
+        and vehicle._consecutive_failures == 0
+        and all(
+            vehicle._data_source_status.get(source) is True
+            for source in sources
+        )
+    )
+
+
+def vehicle_source_generation(vehicle, *sources: str):
+    """Return a comparable success generation for selected vehicle sources."""
+    if vehicle is None:
+        return None
+    return tuple(
+        vehicle._data_source_generation.get(source, -1)
+        for source in sources
+    )
 
 
 def _card_resources() -> tuple[tuple[str, str], ...]:
@@ -241,26 +338,23 @@ async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
     if coordinator.powertrain_type != powertrain_type:
         if powertrain_type != POWERTRAIN_HYBRID:
             remove_electric_entity_registry_entries(hass, entry_id)
-        await hass.config_entries.async_reload(entry_id)
+        hass.config_entries.async_schedule_reload(entry_id)
         return
 
     coordinator.update_interval = timedelta(seconds=interval)
 
-    # Only rebuild the API client when the credentials actually changed;
-    # replacing it discards a healthy session and forces a fresh login.
-    old_api = coordinator.volvo_api
+    # Cached Vehicle objects also hold the API instance. Hot-swapping only
+    # coordinator.volvo_api can therefore send a command through the old
+    # account while the next poll is still pending. Reload the whole entry so
+    # the coordinator and every Vehicle move credentials atomically.
+    current_api = coordinator.volvo_api
     if (
-        getattr(old_api, "_username", None) == username
-        and getattr(old_api, "_password", None) == password
+        getattr(current_api, "_username", None) == username
+        and getattr(current_api, "_password", None) == password
     ):
         return
 
-    session = async_get_clientsession(hass)
-    volvo_api = VehicleAPI(session=session, username=username, password=password)
-    await _async_attach_token_store(hass, volvo_api, username)
-    coordinator.volvo_api = volvo_api
-    if hasattr(old_api, "close"):
-        await old_api.close()
+    hass.config_entries.async_schedule_reload(entry_id)
 
 
 async def async_setup_entry(hass, entry):
@@ -275,24 +369,43 @@ async def async_setup_entry(hass, entry):
         CONF_POWERTRAIN_TYPE, DEFAULT_POWERTRAIN_TYPE
     )
     volvo_api = VehicleAPI(session=session, username=username, password=password)
-    await _async_attach_token_store(hass, volvo_api, username)
-    hass.data.setdefault(DOMAIN, {})
-    coordinator = hass.data[DOMAIN][entry.entry_id] = VolvoCoordinator(
-        hass, volvo_api, interval, powertrain_type
-    )
+    coordinator = None
+    try:
+        await _async_attach_token_store(hass, volvo_api, username)
+        coordinator = VolvoCoordinator(
+            hass,
+            volvo_api,
+            interval,
+            powertrain_type,
+            config_entry=entry,
+        )
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    # Fetch initial data so we have data when entities subscribe
-    #
-    # If the refresh fails, async_config_entry_first_refresh will
-    # raise ConfigEntryNotReady and setup will try again later
-    #
-    # If you do not want to retry setup on failure, use
-    # coordinator.async_refresh() instead
-    #
-    if not entry.update_listeners:
-        entry.add_update_listener(async_update_options)
-    await coordinator.async_config_entry_first_refresh()
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # Home Assistant owns this listener and removes it on unload or a
+        # failed setup retry.
+        entry.async_on_unload(
+            entry.add_update_listener(async_update_options)
+        )
+
+        # Fetch initial data so entities have data when they subscribe.
+        await coordinator.async_config_entry_first_refresh()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        domain_data = hass.data.get(DOMAIN, {})
+        if (
+            coordinator is not None
+            and domain_data.get(entry.entry_id) is coordinator
+        ):
+            domain_data.pop(entry.entry_id, None)
+        if hasattr(volvo_api, "close"):
+            try:
+                await volvo_api.close()
+            except Exception as close_err:  # pragma: no cover - defensive
+                _LOGGER.warning(
+                    "Could not close API client after setup failure (%s)",
+                    type(close_err).__name__,
+                )
+        raise
 
     return True
 
@@ -325,6 +438,8 @@ class VolvoCoordinator(DataUpdateCoordinator):
         volvo_api,
         scan_interval,
         powertrain_type=DEFAULT_POWERTRAIN_TYPE,
+        *,
+        config_entry: ConfigEntry | None = None,
     ):
         """Initialize my coordinator."""
         super().__init__(
@@ -334,6 +449,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
             name="Volvo On Call CN sensor",
             # Polling interval. Will only be polled if there are subscribers.
             update_interval=timedelta(seconds=scan_interval),
+            config_entry=config_entry,
         )
         self.volvo_api = volvo_api
         self.powertrain_type = powertrain_type
@@ -346,6 +462,11 @@ class VolvoCoordinator(DataUpdateCoordinator):
         # clears the second caller's request — which is silently downgraded
         # to a throttled no-op. A counter gives every caller its own token.
         self._pending_force_refreshes = 0
+        # Identity tokens let a timed-out caller remove only its own queued
+        # request. A plain counter cannot distinguish that request from a
+        # concurrent caller's token.
+        self._force_refresh_tokens: list[object] = []
+        self._force_refresh_task_tokens: dict[asyncio.Task, object] = {}
         self._update_lock = asyncio.Lock()
         # Vehicles and stores are keyed by VIN and reused across polls, so the
         # per-source fallback cache inside Vehicle survives between cycles and
@@ -473,9 +594,30 @@ class VolvoCoordinator(DataUpdateCoordinator):
         async with self._update_lock:
             now = datetime.now(timezone.utc)
             # Consume one forced-refresh token, if any caller queued one.
-            force_refresh = self._pending_force_refreshes > 0
-            if force_refresh:
-                self._pending_force_refreshes -= 1
+            task = asyncio.current_task()
+            caller_token = (
+                self._force_refresh_task_tokens.get(task)
+                if task is not None
+                else None
+            )
+            if caller_token is not None:
+                # Consume this caller's own token. It may already have been
+                # consumed by a scheduled update that ran while the caller
+                # was queued behind the coordinator refresh lock.
+                force_refresh = caller_token in self._force_refresh_tokens
+                if force_refresh:
+                    self._force_refresh_tokens.remove(caller_token)
+                    self._pending_force_refreshes -= 1
+            else:
+                # Scheduled refreshes may satisfy the oldest queued forced
+                # request before its caller acquires the HA refresh lock.
+                force_refresh = self._pending_force_refreshes > 0
+                if force_refresh:
+                    self._pending_force_refreshes -= 1
+                    if self._force_refresh_tokens:
+                        self._force_refresh_tokens.pop(0)
+            if force_refresh and caller_token is None:
+                _LOGGER.debug("Scheduled poll consumed a forced refresh token")
             if (
                 not force_refresh
                 and self.data is not None
@@ -582,20 +724,42 @@ class VolvoCoordinator(DataUpdateCoordinator):
             except Exception as err:
                 return self._handle_update_failure(err)
 
-    async def async_force_refresh(self):
+    async def async_force_refresh(self) -> bool:
         """Refresh immediately after a control command, bypassing throttling.
 
-        The request is a token consumed inside _async_update_data while it
-        holds the update lock, so concurrent callers cannot clear each
-        other's request the way a shared boolean did. A token can only leak
-        when the refresh never reaches the update body at all (shutdown),
-        and one leaked token costs one extra real poll later, so the counter
-        is simply capped rather than reconciled.
+        Each caller owns an identity token consumed inside _async_update_data.
+        This preserves concurrent requests and also lets a timed-out caller
+        withdraw only its own still-queued token.
         """
-        self._pending_force_refreshes = min(
-            self._pending_force_refreshes + 1, MAX_PENDING_FORCE_REFRESHES
+        token = object()
+        queued = False
+        if self._pending_force_refreshes < MAX_PENDING_FORCE_REFRESHES:
+            self._force_refresh_tokens.append(token)
+            self._pending_force_refreshes += 1
+            queued = True
+        task = asyncio.current_task()
+        if task is not None:
+            self._force_refresh_task_tokens[task] = token
+        try:
+            await self.async_refresh()
+        finally:
+            token_was_consumed = (
+                queued and token not in self._force_refresh_tokens
+            )
+            # If cancellation happened while waiting for the coordinator
+            # refresh lock, _async_update_data has not consumed this token.
+            # Remove exactly this caller's token so a later scheduled poll is
+            # not accidentally promoted to a forced update.
+            if token in self._force_refresh_tokens:
+                self._force_refresh_tokens.remove(token)
+                self._pending_force_refreshes -= 1
+            if task is not None:
+                self._force_refresh_task_tokens.pop(task, None)
+        return (
+            token_was_consumed
+            and self.last_update_success
+            and self._consecutive_failures == 0
         )
-        await self.async_refresh()
 
     async def _async_enforce_charge_limit(self, vehicle, store_data):
         """Stop an active home-charge session once the SoC limit is reached.

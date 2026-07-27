@@ -1,7 +1,8 @@
 from __future__ import annotations
-import asyncio
+
 import logging
 from typing import Any
+
 from homeassistant.components.lock import (
     LockEntity,
 )
@@ -10,9 +11,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.const import Platform
 
-from . import VolvoCoordinator, VolvoEntity
+from . import (
+    VolvoCoordinator,
+    VolvoEntity,
+    async_confirm_vehicle_state,
+    vehicle_source_generation,
+    vehicle_sources_are_fresh,
+)
 from .volvooncall_cn import DOMAIN
-from .volvooncall_base import MAX_RETRIES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,11 +66,18 @@ class VolvoSensor(VolvoEntity, LockEntity):
         # Must be the forced variant: a plain refresh is dropped by the
         # coordinator's scan-interval throttle, so the lock would keep
         # reporting its pre-command state.
-        for _ in range(MAX_RETRIES):
-            await asyncio.sleep(1)
-            await self.coordinator.async_force_refresh()
-            if self.is_locked == is_locked:
-                break
+        await async_confirm_vehicle_state(
+            self.coordinator,
+            lambda: self.is_locked == is_locked,
+            retry_delay=1,
+            description="Vehicle lock",
+            source_is_fresh=lambda: vehicle_sources_are_fresh(
+                self.vehicle, "exterior"
+            ),
+            source_generation=lambda: vehicle_source_generation(
+                self.vehicle, "exterior"
+            ),
+        )
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the car."""
@@ -96,11 +109,18 @@ class VolvoWindowSensor(VolvoEntity, LockEntity):
         return True
 
     async def _update_status(self, is_locked):
-        for _ in range(MAX_RETRIES):
-            await asyncio.sleep(5)
-            await self.coordinator.async_force_refresh()
-            if self.is_locked == is_locked:
-                break
+        await async_confirm_vehicle_state(
+            self.coordinator,
+            lambda: self.is_locked == is_locked,
+            retry_delay=5,
+            description="Window control",
+            source_is_fresh=lambda: vehicle_sources_are_fresh(
+                self.vehicle, "exterior"
+            ),
+            source_generation=lambda: vehicle_source_generation(
+                self.vehicle, "exterior"
+            ),
+        )
 
     async def async_lock(self, **kwargs: Any) -> None:
         await self.vehicle.lock_window()

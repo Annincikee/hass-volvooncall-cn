@@ -105,7 +105,11 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._reauth_entry
         if entry is None:
             return self.async_abort(reason="reauth_failed")
-        username = entry.data.get(CONF_USERNAME, "")
+        # Options may contain newer credentials than data. Setup and the
+        # options listener both use this same merged precedence, so reauth
+        # must validate the account that is actually running.
+        config_data = {**entry.data, **entry.options}
+        username = config_data.get(CONF_USERNAME, "")
 
         if user_input is not None:
             password = user_input.get(CONF_PASSWORD, "")
@@ -119,10 +123,20 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # The options flow may carry its own stale password copy.
                     if CONF_PASSWORD in options:
                         options[CONF_PASSWORD] = password
-                    self.hass.config_entries.async_update_entry(
+                    was_loaded = (
+                        entry.state
+                        is config_entries.ConfigEntryState.LOADED
+                    )
+                    changed = self.hass.config_entries.async_update_entry(
                         entry, data=data, options=options
                     )
-                    await self.hass.config_entries.async_reload(entry.entry_id)
+                    # A loaded entry's update listener schedules the reload.
+                    # A failed initial setup has no live listener, so restart
+                    # it explicitly after the credentials are repaired.
+                    if not was_loaded or not changed:
+                        self.hass.config_entries.async_schedule_reload(
+                            entry.entry_id
+                        )
                     return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(

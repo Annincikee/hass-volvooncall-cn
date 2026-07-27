@@ -59,7 +59,10 @@ class VolvoStore(Store[StoreData]):
         try:
             legacy = await self._legacy_store.async_load()
         except Exception as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Could not read the legacy store: %s", err)
+            _LOGGER.warning(
+                "Could not read the legacy store (%s)",
+                type(err).__name__,
+            )
             return None
         if not legacy:
             return None
@@ -72,7 +75,10 @@ class VolvoStore(Store[StoreData]):
         try:
             await self._legacy_store.async_remove()
         except Exception as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Could not remove the legacy store: %s", err)
+            _LOGGER.warning(
+                "Could not remove the legacy store (%s)",
+                type(err).__name__,
+            )
         return legacy
 
     async def load_create_data(self) -> StoreData:

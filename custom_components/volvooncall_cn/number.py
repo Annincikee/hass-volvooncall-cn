@@ -4,7 +4,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import Platform
-from . import VolvoCoordinator, VolvoEntity
+
+from . import (
+    VolvoCoordinator,
+    VolvoEntity,
+    async_refresh_after_control,
+    vehicle_source_generation,
+    vehicle_sources_are_fresh,
+)
 from .store import CHARGE_LIMIT_DISABLED, CHARGE_LIMIT_MIN
 from .volvooncall_cn import DOMAIN
 
@@ -85,4 +92,13 @@ class VolvoChargeLimitNumber(VolvoEntity, NumberEntity):
         self.async_write_ha_state()
         # A lowered limit may already be reached; re-poll so the coordinator
         # can stop an active home-charge session right away.
-        await self.coordinator.async_force_refresh()
+        await async_refresh_after_control(
+            self.coordinator,
+            description="Charge limit",
+            source_is_fresh=lambda: vehicle_sources_are_fresh(
+                self.vehicle, "battery", "charge_pile"
+            ),
+            source_generation=lambda: vehicle_source_generation(
+                self.vehicle, "battery", "charge_pile"
+            ),
+        )

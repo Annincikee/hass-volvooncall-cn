@@ -1,15 +1,19 @@
 """Tests for __init__.py - Integration setup and coordinator."""
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta, timezone
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn import (
     async_migrate_entry,
+    async_setup_entry,
     async_update_options,
     VolvoCoordinator,
 )
@@ -45,13 +49,15 @@ class TestIntegrationSetup:
         config_entry.add_to_hass(hass)
         
         with patch("custom_components.volvooncall_cn.VehicleAPI", return_value=mock_volvo_api):
-            # Mock coordinator to avoid actual API calls
-            with patch("custom_components.volvooncall_cn.VolvoCoordinator.async_config_entry_first_refresh"):
-                # Use proper setup method that acquires the lock
-                await hass.config_entries.async_setup(config_entry.entry_id)
-                
-                assert DOMAIN in hass.data
-                assert config_entry.entry_id in hass.data[DOMAIN]
+            # Use proper setup method that acquires the lock.
+            await hass.config_entries.async_setup(config_entry.entry_id)
+
+            assert DOMAIN in hass.data
+            assert config_entry.entry_id in hass.data[DOMAIN]
+            assert (
+                hass.data[DOMAIN][config_entry.entry_id].config_entry
+                is config_entry
+            )
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_with_default_scan_interval(self, hass: HomeAssistant, mock_volvo_api):
@@ -68,12 +74,11 @@ class TestIntegrationSetup:
         config_entry.add_to_hass(hass)
         
         with patch("custom_components.volvooncall_cn.VehicleAPI", return_value=mock_volvo_api):
-            with patch("custom_components.volvooncall_cn.VolvoCoordinator.async_config_entry_first_refresh"):
-                await hass.config_entries.async_setup(config_entry.entry_id)
-                
-                # Check that coordinator was created with default interval
-                coordinator = hass.data[DOMAIN][config_entry.entry_id]
-                assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+            await hass.config_entries.async_setup(config_entry.entry_id)
+
+            # Check that coordinator was created with default interval
+            coordinator = hass.data[DOMAIN][config_entry.entry_id]
+            assert coordinator.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_adds_update_listener(self, hass: HomeAssistant, mock_volvo_api):
@@ -90,11 +95,52 @@ class TestIntegrationSetup:
         config_entry.add_to_hass(hass)
         
         with patch("custom_components.volvooncall_cn.VehicleAPI", return_value=mock_volvo_api):
-            with patch("custom_components.volvooncall_cn.VolvoCoordinator.async_config_entry_first_refresh"):
-                await hass.config_entries.async_setup(config_entry.entry_id)
-                
-                # Verify update listener was added
-                assert len(config_entry.update_listeners) > 0
+            await hass.config_entries.async_setup(config_entry.entry_id)
+
+            # Verify update listener was added
+            assert len(config_entry.update_listeners) > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "setup_error",
+        [
+            ConfigEntryNotReady("backend unavailable"),
+            asyncio.CancelledError(),
+        ],
+    )
+    async def test_setup_failure_cleans_coordinator_and_api(
+        self,
+        hass: HomeAssistant,
+        mock_volvo_api,
+        setup_error,
+    ):
+        """A failed or cancelled first refresh must leave no live client."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: TEST_PASSWORD,
+            },
+            unique_id=TEST_USERNAME,
+        )
+        config_entry.add_to_hass(hass)
+        other_coordinator = object()
+        hass.data.setdefault(DOMAIN, {})["other-entry"] = other_coordinator
+
+        with patch(
+            "custom_components.volvooncall_cn.VehicleAPI",
+            return_value=mock_volvo_api,
+        ), patch(
+            "custom_components.volvooncall_cn.VolvoCoordinator."
+            "async_config_entry_first_refresh",
+            new=AsyncMock(side_effect=setup_error),
+        ):
+            with pytest.raises(type(setup_error)):
+                await async_setup_entry(hass, config_entry)
+
+        assert config_entry.entry_id not in hass.data[DOMAIN]
+        assert hass.data[DOMAIN]["other-entry"] is other_coordinator
+        mock_volvo_api.close.assert_awaited_once()
 
 
 # =============================================================================
@@ -134,8 +180,10 @@ class TestUpdateOptions:
             assert coordinator.update_interval == timedelta(seconds=new_scan_interval)
 
     @pytest.mark.asyncio
-    async def test_async_update_options_updates_api(self, hass: HomeAssistant, mock_volvo_api):
-        """Test that updating options creates new API instance."""
+    async def test_async_update_options_reloads_on_credential_change(
+        self, hass: HomeAssistant, mock_volvo_api
+    ):
+        """Credential changes reload every cached vehicle and API together."""
         config_entry = MockConfigEntry(
             domain=DOMAIN,
             data={
@@ -148,10 +196,12 @@ class TestUpdateOptions:
         config_entry.add_to_hass(hass)
         
         hass.data.setdefault(DOMAIN, {})
-        with patch("custom_components.volvooncall_cn.VehicleAPI") as mock_api_class:
-            old_api = AsyncMock()
-            mock_api_class.return_value = old_api
-            
+        with patch(
+            "custom_components.volvooncall_cn.VehicleAPI"
+        ) as mock_api_class, patch.object(
+            hass.config_entries, "async_schedule_reload"
+        ) as mock_reload:
+            old_api = mock_volvo_api
             coordinator = VolvoCoordinator(hass, old_api, TEST_SCAN_INTERVAL)
             hass.data[DOMAIN][config_entry.entry_id] = coordinator
             
@@ -160,11 +210,11 @@ class TestUpdateOptions:
             hass.config_entries.async_update_entry(config_entry, options={CONF_PASSWORD: new_password})
             
             await async_update_options(hass, config_entry)
-            
-            # Verify new API instance was created
-            assert mock_api_class.called
-            # Verify coordinator's API was updated
-            assert coordinator.volvo_api is not None
+
+            mock_reload.assert_called_once_with(config_entry.entry_id)
+            mock_api_class.assert_not_called()
+            assert coordinator.volvo_api is old_api
+            old_api.close.assert_not_awaited()
 
 
 # =============================================================================
@@ -373,7 +423,11 @@ class TestErrorScenarios:
             with patch.object(VolvoCoordinator, "async_config_entry_first_refresh", 
                             side_effect=ConfigEntryAuthFailed("Auth failed")):
                 # Mock async_step_reauth to avoid the UnknownStep error
-                with patch.object(config_entry, "async_start_reauth", new_callable=AsyncMock):
+                with patch.object(
+                    config_entry,
+                    "async_start_reauth",
+                    new_callable=MagicMock,
+                ):
                     # Setup should fail but not crash
                     await hass.config_entries.async_setup(config_entry.entry_id)
                     

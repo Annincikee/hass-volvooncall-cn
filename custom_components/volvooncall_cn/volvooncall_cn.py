@@ -564,6 +564,12 @@ class Vehicle(object):
         if self.supports_electric:
             self._data_source_status["battery"] = True
             self._data_source_status["charge_pile"] = True
+        # A True status can be historical. Controls also compare this
+        # generation before/after their forced poll so a cached or temporarily
+        # absent vehicle cannot confirm an optimistic local state.
+        self._data_source_generation: Dict[str, int] = {
+            source: -1 for source in self._data_source_status
+        }
 
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
@@ -574,6 +580,7 @@ class Vehicle(object):
         self._cache_timestamp[source] = dt.now(timezone.utc)
         self._last_successful_update = dt.now(timezone.utc)
         self._data_source_status[source] = True
+        self._data_source_generation[source] = self._poll_cycle + 1
         self._consecutive_failures = 0
         _LOGGER.debug("Cached %s data for %s", source, vehicle_log_ref(self.vin))
     
@@ -962,6 +969,10 @@ class Vehicle(object):
         self._save_to_cache("battery", data)
         self._data_source_status["battery"] = battery_ok
         self._data_source_status["charge_pile"] = pile_ok
+        if pile_ok:
+            self._data_source_generation["charge_pile"] = (
+                self._poll_cycle + 1
+            )
 
     async def _parse_odometer(self):
         try:
@@ -1169,19 +1180,17 @@ class Vehicle(object):
         every = SOURCE_REFRESH_EVERY_CYCLES.get(source)
         if every is None:
             return True
+        # A cadence only applies to healthy cached data. If the latest call
+        # failed, retry on the next cycle instead of leaving (for example)
+        # a failed preference source stale for another 239 polls.
+        if self._data_source_status.get(source) is False:
+            return True
         # Always run on the first cycle so entities are populated at setup.
         if source not in self._cache:
             return True
         return self._poll_cycle % every == 0
 
     async def update(self):
-        if not self.series_name:
-            vehicles = await self._api.get_vehicles()
-            for vehicle in vehicles:
-                if vehicle["vinCode"] == self.vin:
-                    self.series_name = vehicle["seriesName"]
-                    self.model_name = vehicle["modelName"]
-
         tasks = []
         await self._api.get_channel()
         # Sources that can change at any moment run every cycle; slow-moving

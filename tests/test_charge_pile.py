@@ -363,7 +363,12 @@ async def test_home_switch_uses_forced_refresh_for_confirmation(monkeypatch):
     vehicle.home_charge_status = "starting"
     coordinator = MagicMock()
     coordinator.data = [vehicle]
-    coordinator.async_force_refresh = AsyncMock()
+
+    async def refreshed():
+        vehicle._data_source_generation["charge_pile"] += 1
+        return True
+
+    coordinator.async_force_refresh = AsyncMock(side_effect=refreshed)
     monkeypatch.setattr("asyncio.sleep", AsyncMock())
     entity = VolvoHomeChargeSwitch(
         coordinator, 0, "home_charge_switch"

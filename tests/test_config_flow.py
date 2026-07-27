@@ -383,8 +383,8 @@ class TestEdgeCases:
             "custom_components.volvooncall_cn.config_flow.volvo_validation",
             return_value={},
         ), patch.object(
-            hass.config_entries, "async_reload", new_callable=AsyncMock
-        ):
+            hass.config_entries, "async_schedule_reload"
+        ) as mock_reload:
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
                 user_input={CONF_PASSWORD: "new_password"},
@@ -393,6 +393,88 @@ class TestEdgeCases:
         assert result["type"] == data_entry_flow.FlowResultType.ABORT
         assert result["reason"] == "reauth_successful"
         assert config_entry.data[CONF_PASSWORD] == "new_password"
+        mock_reload.assert_called_once_with(config_entry.entry_id)
+
+    @pytest.mark.asyncio
+    async def test_reauth_same_password_still_restarts_loaded_entry(
+        self, hass: HomeAssistant
+    ):
+        """An unchanged entry has no listener callback to restart polling."""
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: TEST_USERNAME,
+                CONF_PASSWORD: TEST_PASSWORD,
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            unique_id=TEST_USERNAME,
+            version=3,
+        )
+        config_entry.add_to_hass(hass)
+        config_entry.mock_state(
+            hass, config_entries.ConfigEntryState.LOADED
+        )
+
+        result = await config_entry.start_reauth_flow(hass)
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            return_value={},
+        ), patch.object(
+            hass.config_entries, "async_schedule_reload"
+        ) as mock_reload:
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_PASSWORD: TEST_PASSWORD},
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.ABORT
+        assert result["reason"] == "reauth_successful"
+        mock_reload.assert_called_once_with(config_entry.entry_id)
+
+    @pytest.mark.asyncio
+    async def test_reauth_uses_account_overridden_in_options(
+        self, hass: HomeAssistant
+    ):
+        """Reauth must target the credentials the integration is running."""
+        runtime_username = "options-account"
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: "stale-data-account",
+                CONF_PASSWORD: "stale-data-password",
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            options={
+                CONF_USERNAME: runtime_username,
+                CONF_PASSWORD: "runtime-old-password",
+            },
+            unique_id=TEST_USERNAME,
+            version=3,
+        )
+        config_entry.add_to_hass(hass)
+
+        result = await config_entry.start_reauth_flow(hass)
+        assert result["description_placeholders"]["username"] == runtime_username
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={}),
+        ) as mock_validation, patch.object(
+            hass.config_entries, "async_schedule_reload"
+        ):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_PASSWORD: "runtime-new-password"},
+            )
+
+        assert result["reason"] == "reauth_successful"
+        mock_validation.assert_awaited_once_with(
+            hass, runtime_username, "runtime-new-password"
+        )
+        assert (
+            config_entry.options[CONF_PASSWORD]
+            == "runtime-new-password"
+        )
 
     @pytest.mark.asyncio
     async def test_reauth_flow_rejects_bad_password(self, hass: HomeAssistant):
