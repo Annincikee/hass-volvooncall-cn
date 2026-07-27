@@ -1,5 +1,4 @@
 import logging
-from propcache import cached_property
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -32,30 +31,21 @@ async def async_setup_entry(
 
 
 class VolovEngineDurationNumInput(VolvoEntity, NumberEntity):
+    """Remote-start runtime in minutes, persisted per vehicle."""
+
+    # Plain class attributes: these bounds never change, and the previous
+    # propcache.cached_property versions also froze native_value on first
+    # read, which only went unnoticed because `state` was overridden on top
+    # of it.
+    _attr_native_max_value = 15
+    _attr_native_min_value = 1
+    _attr_native_step = 1
+
     def __init__(self, coordinator, idx, metaMapKey):
         super().__init__(coordinator, idx, metaMapKey, Platform.NUMBER)
-        self.max_duration = 15
-        self.min_duration = 1
-
-    @cached_property
-    def native_max_value(self) -> float:
-        return self.max_duration
-
-    @cached_property
-    def native_min_value(self) -> float:
-        return self.min_duration
-
-    @cached_property
-    def native_step(self) -> float:
-        return 1
-
-    @cached_property
-    def native_value(self):
-        store_data = self._get_store()
-        return store_data.get_engine_duration_number() if store_data else None
 
     @property
-    def state(self):
+    def native_value(self):
         store_data = self._get_store()
         return store_data.get_engine_duration_number() if store_data else None
 
@@ -64,7 +54,10 @@ class VolovEngineDurationNumInput(VolvoEntity, NumberEntity):
         if store_data is None:
             return
         await store_data.set_engine_duration_number(value)
-        await self.coordinator.async_refresh()
+        # Write the new value out directly. Relying on the coordinator
+        # refresh alone left the slider snapping back, because that refresh
+        # is subject to the scan-interval throttle.
+        self.async_write_ha_state()
 
 
 class VolvoChargeLimitNumber(VolvoEntity, NumberEntity):

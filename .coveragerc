@@ -1,0 +1,22 @@
+# coverage.py never reads pytest.ini, so these settings have to live here.
+# Without this file the generated proto modules were counted in the totals,
+# which made the CI coverage gate meaningless.
+[run]
+source = custom_components/volvooncall_cn
+omit =
+    */proto/*
+    */__pycache__/*
+    */tests/*
+
+[report]
+fail_under = 50
+precision = 2
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod

@@ -63,9 +63,13 @@ class VolvoSwitchEntity(VolvoEntity, SwitchEntity):
         self.checkMetaKeys = checkMetaKeys
 
     async def _update_status(self, is_on):
+        # async_force_refresh() bypasses the coordinator's scan-interval
+        # throttle. A plain async_refresh() here is swallowed whenever the
+        # command lands before the interval has elapsed, which is most of
+        # the time, leaving the switch stuck on its pre-command state.
         for _ in range(MAX_RETRIES):
             await asyncio.sleep(2)
-            await self.coordinator.async_refresh()
+            await self.coordinator.async_force_refresh()
             if self.is_on == is_on:
                 break
 

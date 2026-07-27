@@ -4,8 +4,8 @@ import grpc
 from grpc import aio as grpc_aio
 import asyncio
 from datetime import datetime as dt, timedelta, timezone
-from typing import Dict, Any, Optional
-import copy
+from typing import Dict, Any
+from homeassistant.exceptions import HomeAssistantError
 from .volvooncall_base import (
     VehicleBaseAPI,
     gcj02towgs84,
@@ -20,7 +20,7 @@ from .proto.health_pb2 import GetHealthReq, GetHealthResp, HealthStatus
 from .proto.fuel_pb2_grpc import FuelServiceStub
 from .proto.fuel_pb2 import GetFuelReq, GetFuelResp
 from .proto.invocation_pb2_grpc import InvocationServiceStub
-from .proto.invocation_pb2 import invocationHead, invocationStatus, invocationControlType, invocationCommResp
+from .proto.invocation_pb2 import invocationHead, invocationStatus, invocationControlType
 from .proto.invocation_pb2 import windowControlReq
 from .proto.invocation_pb2 import EngineStartReq
 from .proto.invocation_pb2 import ClimatizationStartReq, ClimatizationStopReq
@@ -50,10 +50,31 @@ _LOGGER = logging.getLogger(__name__)
 GRPC_DIGITALVOLVO_HOST = "cepmobtoken.prod.c3.volvocars.com.cn:443"
 GRPC_LBS_VOLVO_HOST = "cepmobtoken.lbs.prod.c3.volvocars.com.cn:443"
 USER_AGENT = "vca-android/5.53.1 grpc-java-okhttp/1.68.0"
-MAX_RETRIES = 1
 TIMEOUT = datetime.timedelta(seconds=10)
 TIMEOUT_SECONDS = int(TIMEOUT.total_seconds())
 DOMAIN = "volvooncall_cn"
+
+# Keepalive matters here: the integration runs for months behind consumer
+# NAT, and an idle HTTP/2 connection that a middlebox silently dropped is
+# only discovered when the next RPC times out — costing a whole poll cycle
+# for every data source on that channel.
+GRPC_CHANNEL_OPTIONS = (
+    ("grpc.primary_user_agent", USER_AGENT),
+    ("grpc.accept_encoding", "gzip"),
+    ("grpc.keepalive_time_ms", 60_000),
+    ("grpc.keepalive_timeout_ms", 10_000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
+)
+
+# How often each data source is refreshed, in poll cycles. Vehicle state that
+# can change at any moment is read every cycle; the rest is throttled, which
+# takes a 30s-interval install from ~12 requests per cycle down to ~7.
+SOURCE_REFRESH_EVERY_CYCLES = {
+    "health": 20,       # fluid/tyre warnings: ~10 min at a 30s interval
+    "preference": 240,  # vehicle nickname: ~2 h
+    "odometer": 4,      # ~2 min; only moves while driving
+}
 
 
 async def _first_stream_response(call, default=None):
@@ -131,8 +152,9 @@ class VehicleAPI(VehicleBaseAPI):
         callCreds = grpc.metadata_call_credentials(self._metadata_callback)
         sslCreds = grpc.ssl_channel_credentials()
         creds = grpc.composite_channel_credentials(sslCreds, callCreds)
-        channel_options: tuple = (("grpc.primary_user_agent", USER_AGENT), ('grpc.accept_encoding', 'gzip'),)
-        channel = grpc_aio.secure_channel(target, creds, options=channel_options)
+        channel = grpc_aio.secure_channel(
+            target, creds, options=GRPC_CHANNEL_OPTIONS
+        )
         return channel
 
     async def get_channel(self):
@@ -166,22 +188,25 @@ class VehicleAPI(VehicleBaseAPI):
                 _LOGGER.debug("Error closing gRPC channel: %s", err)
 
     def raise_invocation_fail(self, status):
+        # HomeAssistantError, not a bare Exception: Home Assistant renders it
+        # as a clean message on the service call instead of dumping a stack
+        # trace into the log for what is an expected vehicle-side refusal.
         if status in [invocationStatus.SUCCESS, invocationStatus.SENT, invocationStatus.DELIVERED]:
             return
         if status == invocationStatus.CAR_OFFLINE:
-            raise Exception("车辆离线或无网络")
+            raise HomeAssistantError("车辆离线或无网络")
         elif status in [invocationStatus.DELIVERY_TIMEOUT, invocationStatus.RESPONSE_TIMEOUT]:
-            raise Exception("请求超时")
+            raise HomeAssistantError("请求超时")
         elif status == invocationStatus.UNKNOWN_CAR_ERROR:
-            raise Exception("车辆未知错误")
+            raise HomeAssistantError("车辆未知错误")
         elif status == invocationStatus.NOT_ALLOWED_PRIVACY_ENABLED:
-            raise Exception("车辆隐私协议未同意")
+            raise HomeAssistantError("车辆隐私协议未同意")
         elif status == invocationStatus.NOT_ALLOWED_WRONG_USAGE_MODE:
-            raise Exception("请求模式错误")
+            raise HomeAssistantError("请求模式错误")
         elif status == invocationStatus.NOT_ALLOWED_CONFLICTING_INVOCATION:
-            raise Exception("请求操作存在冲突")
+            raise HomeAssistantError("请求操作存在冲突")
         else:
-            raise Exception("未知错误")
+            raise HomeAssistantError("未知错误")
 
     async def get_fuel_status(self, vin) -> GetFuelResp:
         stub = FuelServiceStub(await self.get_channel())
@@ -210,8 +235,7 @@ class VehicleAPI(VehicleBaseAPI):
         )
         if res is None:
             return GetHealthResp()
-        _LOGGER.debug("get_health resp")
-        _LOGGER.debug(res)
+        _LOGGER.debug("get_health resp: %s", redact_sensitive(res))
         return res
 
     async def get_odometer(self, vin) -> GetOdometerResp:
@@ -241,7 +265,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.WindowControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -267,7 +291,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.EngineStart(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -294,7 +318,7 @@ class VehicleAPI(VehicleBaseAPI):
 
         res = await _first_stream_response(responses)
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
 
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
@@ -306,7 +330,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.HonkFlash(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -319,7 +343,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.Lock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -334,7 +358,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.Unlock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -347,7 +371,7 @@ class VehicleAPI(VehicleBaseAPI):
         )
         if res is None:
             return GetEngineRemoteStartResp()
-        _LOGGER.debug(res)
+        _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
     async def sunroof_contorl(self, vin: str, controlType: invocationControlType):
@@ -359,7 +383,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.SunroofControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -372,7 +396,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.TailgateControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug(res)
+            _LOGGER.debug("%s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -385,8 +409,7 @@ class VehicleAPI(VehicleBaseAPI):
             stub.UpdateStatus(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
         if res is not None:
-            _LOGGER.debug("update_status resp")
-            _LOGGER.debug(res)
+            _LOGGER.debug("update_status resp: %s", redact_sensitive(res))
             self.raise_invocation_fail(res.data.status)
         return
 
@@ -399,7 +422,7 @@ class VehicleAPI(VehicleBaseAPI):
         )
         if res is None:
             return GetPreferencesResp()
-        _LOGGER.debug(res)
+        _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
     async def get_battery_status(self, vin: str) -> GetBatteryResponse:
@@ -422,7 +445,7 @@ class VehicleAPI(VehicleBaseAPI):
         )
         if res is None:
             return UpdatePreferencesResp()
-        _LOGGER.debug(res)
+        _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
 
@@ -495,14 +518,20 @@ class Vehicle(object):
         self.engine_remote_start_time = 0
         self.engine_remote_end_time = 0
         # self.fuel_amount_level = 0
+        # None, not (0, 0): a zeroed fix is a real coordinate in the Gulf of
+        # Guinea, so defaulting to it parked every not-yet-located car there
+        # on the map instead of reporting an unknown position.
         self.position = {
-            "longitude": 0.0,
-            "latitude": 0.0
+            "longitude": None,
+            "latitude": None,
         }
         self.position_wgs84 = {
-            "longitude": 0.0,
-            "latitude": 0.0
+            "longitude": None,
+            "latitude": None,
         }
+        # Set by the coordinator when the car stops appearing in the account
+        # listing; entities consult it to go unavailable.
+        self.is_unbound = False
         self.service_warning_msg = "1"
         self.service_warning = False
         self.brake_fluid_level_warning = False
@@ -516,6 +545,7 @@ class Vehicle(object):
         self.nickname = ""
 
         # Caching infrastructure for resilience
+        self._poll_cycle = 0  # drives SOURCE_REFRESH_EVERY_CYCLES throttling
         self._cache: Dict[str, Any] = {}  # Stores last known good values
         self._cache_timestamp: Dict[str, dt] = {}  # Timestamps for each data source
         self._last_successful_update = dt.now(timezone.utc)
@@ -537,7 +567,9 @@ class Vehicle(object):
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
         """Save successful data to cache."""
-        self._cache[source] = copy.deepcopy(data_dict)
+        # Shallow copy is enough: every value in these snapshots is a scalar
+        # or a freshly built dict that nothing else holds a reference to.
+        self._cache[source] = dict(data_dict)
         self._cache_timestamp[source] = dt.now(timezone.utc)
         self._last_successful_update = dt.now(timezone.utc)
         self._data_source_status[source] = True
@@ -1004,22 +1036,32 @@ class Vehicle(object):
     async def _parse_location(self):
         try:
             location_resp: StreamLastKnownLocationsResp = await self._api.get_location(self.vin)
-            
-            # Build data dict
-            data = {
-                "position": {
-                    "latitude": location_resp.latitude,
-                    "longitude": location_resp.longitude,
-                },
-            }
-            
-            # Calculate WGS84 coordinates
-            wgs84_coords = gcj02towgs84(location_resp.longitude, location_resp.latitude)
-            data["position_wgs84"] = {
-                "longitude": wgs84_coords[0],
-                "latitude": wgs84_coords[1],
-            }
-            
+
+            latitude = location_resp.latitude
+            longitude = location_resp.longitude
+
+            # An all-zero response is "no fix", not a position off West
+            # Africa. Feeding it through gcj02towgs84 would even produce a
+            # plausible-looking non-zero pair, so it has to be caught here.
+            if not latitude and not longitude:
+                data = {
+                    "position": {"latitude": None, "longitude": None},
+                    "position_wgs84": {"latitude": None, "longitude": None},
+                }
+            else:
+                wgs84_coords = gcj02towgs84(longitude, latitude)
+                data = {
+                    "position": {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                    },
+                    "position_wgs84": {
+                        "longitude": wgs84_coords[0],
+                        "latitude": wgs84_coords[1],
+                    },
+                }
+
+
             # Set attributes
             for key, value in data.items():
                 setattr(self, key, value)
@@ -1109,6 +1151,28 @@ class Vehicle(object):
                     vehicle_log_ref(self.vin),
                 )
             return
+    def apply_vehicle_info(self, vehicle_info):
+        """Seed the static model fields from an account listing entry.
+
+        The coordinator already fetched listBindCar for this poll, so taking
+        the names from there avoids a second identical request on first sight
+        of the vehicle.
+        """
+        if not vehicle_info:
+            return
+        self.series_name = vehicle_info.get("seriesName") or self.series_name
+        self.model_name = vehicle_info.get("modelName") or self.model_name
+
+    def _should_refresh(self, source):
+        """Return True when this source is due on the current poll cycle."""
+        every = SOURCE_REFRESH_EVERY_CYCLES.get(source)
+        if every is None:
+            return True
+        # Always run on the first cycle so entities are populated at setup.
+        if source not in self._cache:
+            return True
+        return self._poll_cycle % every == 0
+
     async def update(self):
         if not self.series_name:
             vehicles = await self._api.get_vehicles()
@@ -1119,18 +1183,29 @@ class Vehicle(object):
 
         tasks = []
         await self._api.get_channel()
+        # Sources that can change at any moment run every cycle; slow-moving
+        # ones are throttled by SOURCE_REFRESH_EVERY_CYCLES.
+        candidates = [
+            ("exterior", self._parse_exterior),
+            ("odometer", self._parse_odometer),
+            ("fuel", self._parse_fuel),
+            ("availability", self._parse_availability),
+            ("location", self._parse_location),
+            ("engine_status", self._parse_engine_status),
+            ("health", self._parse_health),
+            ("preference", self._parse_car_preference),
+        ]
+        if self.supports_electric:
+            candidates.append(("battery", self._parse_battery))
+
         async with asyncio.TaskGroup() as tg:
-            funcs = [self._parse_exterior, self._parse_odometer,
-                     self._parse_fuel, self._parse_availability,
-                     self._parse_location, self._parse_engine_status,
-                     self._parse_health, self._parse_car_preference]
-            if self.supports_electric:
-                funcs.append(self._parse_battery)
-            for runf in funcs:
-                task = tg.create_task(runf())
-                tasks.append(task)
+            for source, runf in candidates:
+                if not self._should_refresh(source):
+                    continue
+                tasks.append(tg.create_task(runf()))
         for task in tasks:
             task.result()
+        self._poll_cycle += 1
 
     async def lock_window(self):
         await self._api.window_control(self.vin, invocationControlType.CLOSE)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.device_tracker import TrackerEntity
+from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -31,23 +31,22 @@ class VolvoSensor(VolvoEntity, TrackerEntity):
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator, idx, metaMapKey, Platform.DEVICE_TRACKER)
 
-    @property
-    def source_type(self):
-        """Handle updated data from the coordinator."""
-        return "gps"
+    _attr_source_type = SourceType.GPS
+
+    def _coordinate(self, axis):
+        """Return one coordinate, or None when the vehicle has no fix."""
+        vehicle = self.vehicle
+        if vehicle is None:
+            return None
+        position = vehicle.get(self.metaMapKey) or {}
+        return position.get(axis)
 
     @property
     def latitude(self):
         """Handle updated data from the coordinator."""
-        vehicle = self.vehicle
-        if vehicle is None:
-            return None
-        return vehicle.get(self.metaMapKey)["latitude"]
+        return self._coordinate("latitude")
 
     @property
     def longitude(self):
         """Handle updated data from the coordinator."""
-        vehicle = self.vehicle
-        if vehicle is None:
-            return None
-        return vehicle.get(self.metaMapKey)["longitude"]
+        return self._coordinate("longitude")

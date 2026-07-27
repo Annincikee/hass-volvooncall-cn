@@ -2,10 +2,12 @@
     "domain": "volvooncall_cn",
     "name": "Volvo On Call CN",
     "codeowners": [
+      "@Annincikee",
       "@idreamshen",
       "@chliny"
     ],
     "config_flow": true,
+    "integration_type": "hub",
     "dependencies": [
         "http",
         "lovelace"
@@ -14,8 +16,7 @@
     "documentation": "https://github.com/Annincikee/hass-volvooncall-cn",
     "iot_class": "cloud_polling",
     "requirements": [
-        "grpcio>=1.67.1",
-        "grpcio-tools>=1.67.1"
+        "grpcio>=1.67.1"
     ],
     "version": "3.2.0",
     "loggers": [

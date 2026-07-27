@@ -16,7 +16,6 @@ import hashlib
 import hmac
 import urllib.parse
 from urllib.parse import urlparse
-from datetime import datetime
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,6 +33,16 @@ DIGITALVOLVO_URL = "https://apigateway.digitalvolvo.com"
 
 TIMEOUT = timedelta(seconds=10)
 MAX_RETRIES = 3
+# Backoff between transport retries. Kept small on purpose: the whole update
+# cycle runs under a single timeout while holding the coordinator lock, and
+# an exponential 1s/2s/4s ladder pushed the worst case for one REST call past
+# what the cycle budget allowed, so a flaky network killed every poll before
+# any data landed.
+RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+# Worst case for one REST call, used to size UPDATE_CYCLE_TIMEOUT.
+REQUEST_BUDGET = TIMEOUT.total_seconds() * MAX_RETRIES + sum(
+    RETRY_BACKOFF_SECONDS[: MAX_RETRIES - 1]
+)
 DEFAULT_SCAN_INTERVAL = 30
 MIN_SCAN_INTERVAL = 30
 
@@ -121,6 +130,13 @@ def redact_sensitive(value):
     return text
 
 
+def _retry_delay(attempt_index):
+    """Return the backoff before the retry that follows attempt_index."""
+    if attempt_index < len(RETRY_BACKOFF_SECONDS):
+        return RETRY_BACKOFF_SECONDS[attempt_index]
+    return RETRY_BACKOFF_SECONDS[-1]
+
+
 def vehicle_log_ref(vin):
     """Return a stable, non-reversible reference suitable for log messages."""
     digest = hashlib.sha256(str(vin).encode("utf-8")).hexdigest()[:10]
@@ -155,6 +171,12 @@ class VehicleBaseAPI:
             "digitalvolvo_x_token": self._digitalvolvo_x_token,
             "vocapi_access_token": self._vocapi_access_token,
             "access_token_expire_at": self._access_token_expire_at,
+            # Persisted so the risk-control cooldown survives restarts. A
+            # purely in-memory timestamp is reset by every Home Assistant
+            # restart and by every ConfigEntryNotReady retry, which rebuilds
+            # the API object — exactly the situations that produce a burst
+            # of password logins.
+            "last_password_login_at": self._last_password_login_at,
         }
 
     def import_tokens(self, data):
@@ -173,6 +195,25 @@ class VehicleBaseAPI:
             )
         except (TypeError, ValueError):
             self._access_token_expire_at = 0
+        try:
+            last_login = int(data.get("last_password_login_at") or 0)
+        except (TypeError, ValueError):
+            last_login = 0
+        # A timestamp from the future (clock skew, restored backup) would
+        # wedge logins shut, so never extend the cooldown past one window.
+        now = int(time.time())
+        self._last_password_login_at = min(last_login, now)
+
+    def _discard_refresh_token(self):
+        """Drop a refresh token the server rejected, in memory and on disk.
+
+        Clearing only the in-memory copy left the dead token in the auth
+        store, so every restart replayed it and burned a guaranteed-failing
+        refresh call before falling back to a password login.
+        """
+        self._refresh_token = ""
+        self._access_token_expire_at = 0
+        self._notify_token_listener()
 
     def _notify_token_listener(self):
         if self._token_listener is None:
@@ -251,7 +292,7 @@ class VehicleBaseAPI:
                     "Transient server error from the API: %s", safe_message
                 )
                 if i < max_attempts - 1:
-                    await asyncio.sleep(2**i)  # Exponential backoff
+                    await asyncio.sleep(_retry_delay(i))
                 else:
                     raise VolvoApiHttpError(safe_message) from None
             except Exception as error:
@@ -261,7 +302,7 @@ class VehicleBaseAPI:
                     redact_sensitive(error),
                 )
                 if i < max_attempts - 1:  # Don't delay on last attempt
-                    await asyncio.sleep(2**i)  # Exponential backoff
+                    await asyncio.sleep(_retry_delay(i))
                 else:
                     raise
 
@@ -319,8 +360,7 @@ class VehicleBaseAPI:
                     "Token refresh failed, re-authenticating with password: %s",
                     redact_sensitive(err),
                 )
-                self._refresh_token = ""
-                self._access_token_expire_at = 0
+                self._discard_refresh_token()
 
         now = int(time.time())
         if (now - self._last_password_login_at) < PASSWORD_LOGIN_COOLDOWN:
@@ -329,16 +369,22 @@ class VehicleBaseAPI:
                 f"{PASSWORD_LOGIN_COOLDOWN}s to avoid account risk control"
             )
         # Failed attempts count too; hammering the auth endpoint with a
-        # rejected password is exactly what risk control punishes.
+        # rejected password is exactly what risk control punishes. Persist it
+        # right away so a restart mid-cooldown cannot reset the window.
         self._last_password_login_at = now
+        self._notify_token_listener()
 
         url = urljoin(DIGITALVOLVO_URL, "/app/iam/api/v1/auth")
         try:
+            # Exactly one attempt: the local cooldown above accounts for a
+            # single password login, so letting the transport retry would
+            # put up to MAX_RETRIES real password posts on the auth endpoint
+            # per cooldown window — the very pattern risk control punishes.
             result = await self.digitalvolvo_post(url, {}, {
                 "authType": "password",
                 "password": self._password,
                 "phoneNumber": "0086" + self._username
-            })
+            }, max_attempts=1)
         except (VolvoAuthExpiredError, VolvoApiHttpError):
             # Transport-level failures are not a verdict on the credentials.
             raise
@@ -387,8 +433,7 @@ class VehicleBaseAPI:
                 "Token refresh failed, re-authenticating with password: %s",
                 redact_sensitive(err),
             )
-            self._refresh_token = ""
-            self._access_token_expire_at = 0
+            self._discard_refresh_token()
             await self.login()
 
     async def get_vehicles(self):

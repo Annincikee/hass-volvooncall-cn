@@ -1,14 +1,12 @@
 """Tests for config_flow.py - Home Assistant integration configuration."""
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn.config_flow import (
-    VolvoOnCallCnConfigFlow,
-    VolvoOnCallCnOptionsFlow,
     masked_account_title,
     volvo_validation,
 )

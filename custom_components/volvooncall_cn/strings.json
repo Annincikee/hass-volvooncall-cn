@@ -313,6 +313,29 @@
             },
             "charging_power": {
                 "name": "{nickname} Charging power"
+            },
+            "charging_voltage": {
+                "name": "{nickname} Charging voltage"
+            },
+            "charging_current": {
+                "name": "{nickname} Charging current"
+            },
+            "charging_session_energy": {
+                "name": "{nickname} Charging session energy"
+            },
+            "connection_status": {
+                "name": "{nickname} Connection Status",
+                "state_attributes": {
+                    "last_update_time": {
+                        "name": "Last Update Time"
+                    },
+                    "consecutive_failures": {
+                        "name": "Consecutive Failures"
+                    },
+                    "cache_info": {
+                        "name": "Cache Info"
+                    }
+                }
             }
         },
         "device_tracker": {

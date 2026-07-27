@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from typing import Any
 from homeassistant.components.lock import (
     LockEntity,
 )
@@ -56,9 +57,12 @@ class VolvoSensor(VolvoEntity, LockEntity):
         return vehicle.get("car_locked")
 
     async def _update_status(self, is_locked):
+        # Must be the forced variant: a plain refresh is dropped by the
+        # coordinator's scan-interval throttle, so the lock would keep
+        # reporting its pre-command state.
         for _ in range(MAX_RETRIES):
             await asyncio.sleep(1)
-            await self.coordinator.async_refresh()
+            await self.coordinator.async_force_refresh()
             if self.is_locked == is_locked:
                 break
 
@@ -93,8 +97,8 @@ class VolvoWindowSensor(VolvoEntity, LockEntity):
 
     async def _update_status(self, is_locked):
         for _ in range(MAX_RETRIES):
-            __ = await asyncio.sleep(5)
-            __ = await self.coordinator.async_refresh()
+            await asyncio.sleep(5)
+            await self.coordinator.async_force_refresh()
             if self.is_locked == is_locked:
                 break
 

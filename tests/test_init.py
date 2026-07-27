@@ -10,7 +10,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.volvooncall_cn import (
     async_migrate_entry,
-    async_setup_entry,
     async_update_options,
     VolvoCoordinator,
 )
@@ -215,8 +214,8 @@ class TestVolvoCoordinator:
         # Mock get_all_vehicles to return empty list
         mock_volvo_api.get_all_vehicles = AsyncMock(return_value=[])
         
-        result = await coordinator._async_update_data()
-        
+        await coordinator._async_update_data()
+
         # Should not raise error, just return empty data
         assert coordinator.store_datas == []
 
@@ -257,7 +256,7 @@ class TestVolvoCoordinator:
         )
         coordinator.data = [MagicMock()]
         coordinator._last_update_started_at = datetime.now(timezone.utc)
-        coordinator._force_next_refresh = True
+        coordinator._pending_force_refreshes += 1
         mock_volvo_api.get_vehicles_vins = AsyncMock(return_value={})
 
         result = await coordinator._async_update_data()
@@ -266,7 +265,7 @@ class TestVolvoCoordinator:
         mock_volvo_api.login.assert_awaited_once()
         mock_volvo_api.update_token.assert_awaited_once()
         mock_volvo_api.get_vehicles_vins.assert_awaited_once()
-        assert coordinator._force_next_refresh is False
+        assert coordinator._pending_force_refreshes == 0
 
     @pytest.mark.asyncio
     async def test_coordinator_update_interval_change(self, hass: HomeAssistant, mock_volvo_api):
@@ -374,7 +373,7 @@ class TestErrorScenarios:
             with patch.object(VolvoCoordinator, "async_config_entry_first_refresh", 
                             side_effect=ConfigEntryAuthFailed("Auth failed")):
                 # Mock async_step_reauth to avoid the UnknownStep error
-                with patch.object(config_entry, "async_start_reauth", new_callable=AsyncMock) as mock_reauth:
+                with patch.object(config_entry, "async_start_reauth", new_callable=AsyncMock):
                     # Setup should fail but not crash
                     await hass.config_entries.async_setup(config_entry.entry_id)
                     

@@ -134,13 +134,20 @@ class VolvoOnCallCnConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class VolvoOnCallCnOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self._config_entry = config_entry
+    """Options flow.
 
-    @property
-    def config_entry(self):
-        # 优先用基类提供的，回退到我们传入的
-        return getattr(super(), 'config_entry', self._config_entry)
+    OptionsFlow.config_entry is a read-only property on modern Home
+    Assistant that resolves the live entry from the handler id, so there is
+    nothing to store or override here. The previous override also could not
+    do what it looked like it did: getattr() with a default only swallows
+    AttributeError, not the ValueError the base property raises before hass
+    is set, so the "fallback" never ran — it just risked serving a stale
+    entry captured at flow-creation time if the base property ever went away.
+    """
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        # Signature kept: async_get_options_flow() still passes the entry.
+        pass
 
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()

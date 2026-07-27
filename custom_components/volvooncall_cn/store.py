@@ -1,4 +1,5 @@
 
+import hashlib
 import logging
 import math
 from typing import TypedDict, Unpack
@@ -26,18 +27,59 @@ class StoreData(TypedDict, total=False):
     full_charge_data_source: str
 
 
+def store_key_for(vin: str) -> str:
+    """Return the .storage key for a VIN.
+
+    Hashed, because the key becomes the filename on disk: the previous
+    plaintext form wrote .storage/volvooncall_cn.LYV<...> and leaked the VIN
+    into every backup, snapshot and support screenshot. The auth store
+    already hashed its key the same way.
+    """
+    digest = hashlib.sha256(str(vin).encode("utf-8")).hexdigest()[:16]
+    return f"{DOMAIN}.{digest}"
+
+
 class VolvoStore(Store[StoreData]):
     def __init__(self, hass: HomeAssistant, vin: str):
-        super().__init__(hass=hass, key=f"{DOMAIN}.{vin}", version=STORE_VERSION)
+        super().__init__(
+            hass=hass, key=store_key_for(vin), version=STORE_VERSION
+        )
         self.data: StoreData | None = None
         self.default_data = StoreData(engine_duration_number=5)
+        self._legacy_store: Store[StoreData] = Store(
+            hass=hass, key=f"{DOMAIN}.{vin}", version=STORE_VERSION
+        )
 
     def get(self, key):
         assert self.data is not None
         return self.data.get(key)
 
+    async def _async_migrate_legacy(self) -> StoreData | None:
+        """Move data from the pre-hash, VIN-named store, then delete it."""
+        try:
+            legacy = await self._legacy_store.async_load()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.warning("Could not read the legacy store: %s", err)
+            return None
+        if not legacy:
+            return None
+
+        _LOGGER.info(
+            "Migrating vehicle settings to a hashed storage key so the VIN "
+            "no longer appears in the .storage filename"
+        )
+        await self.async_save(legacy)
+        try:
+            await self._legacy_store.async_remove()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.warning("Could not remove the legacy store: %s", err)
+        return legacy
+
     async def load_create_data(self) -> StoreData:
-        self.data = await self.async_load() or self.default_data
+        data = await self.async_load()
+        if not data:
+            data = await self._async_migrate_legacy()
+        self.data = data or self.default_data
         return self.data
 
     async def update(self, **kwargs: Unpack[StoreData]):

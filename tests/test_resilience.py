@@ -175,11 +175,11 @@ async def test_coordinator_grace_window_then_unavailable(hass: HomeAssistant):
     coordinator = _failing_coordinator(hass, Exception("boom"))
 
     for _ in range(FAILURE_GRACE_CYCLES):
-        coordinator._force_next_refresh = True
+        coordinator._pending_force_refreshes += 1
         result = await coordinator._async_update_data()
         assert result is coordinator.data  # stale but explicit
 
-    coordinator._force_next_refresh = True
+    coordinator._pending_force_refreshes += 1
     with pytest.raises(UpdateFailed):
         await coordinator._async_update_data()
 
@@ -194,11 +194,11 @@ async def test_coordinator_reauth_after_repeated_login_rejections(
     )
 
     for _ in range(LOGIN_REJECTION_REAUTH_THRESHOLD - 1):
-        coordinator._force_next_refresh = True
+        coordinator._pending_force_refreshes += 1
         result = await coordinator._async_update_data()
         assert result is coordinator.data
 
-    coordinator._force_next_refresh = True
+    coordinator._pending_force_refreshes += 1
     with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
 
@@ -236,7 +236,7 @@ async def test_vehicles_are_reused_across_polls(hass: HomeAssistant):
     ):
         first = await coordinator._async_update_data()
         coordinator.data = first
-        coordinator._force_next_refresh = True
+        coordinator._pending_force_refreshes += 1
         second = await coordinator._async_update_data()
 
     assert len(first) == len(second) == 1

@@ -314,6 +314,15 @@
             "charging_power": {
                 "name": "{nickname} Charging power"
             },
+            "charging_voltage": {
+                "name": "{nickname} Charging voltage"
+            },
+            "charging_current": {
+                "name": "{nickname} Charging current"
+            },
+            "charging_session_energy": {
+                "name": "{nickname} Charging session energy"
+            },
             "connection_status": {
                 "name": "{nickname} Connection Status",
                 "state_attributes": {

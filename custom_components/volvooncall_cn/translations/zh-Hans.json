@@ -314,6 +314,15 @@
             "charging_power": {
                 "name": "{nickname}充电功率"
             },
+            "charging_voltage": {
+                "name": "{nickname}充电电压"
+            },
+            "charging_current": {
+                "name": "{nickname}充电电流"
+            },
+            "charging_session_energy": {
+                "name": "{nickname}本次充电电量"
+            },
             "connection_status": {
                 "name": "{nickname}连接状态",
                 "state_attributes": {

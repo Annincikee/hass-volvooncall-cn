@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -65,45 +66,80 @@ FAILURE_GRACE_CYCLES = 5
 # reauthentication flow. More than one, because the server occasionally
 # rejects a valid account transiently under risk control.
 LOGIN_REJECTION_REAUTH_THRESHOLD = 3
-# Hard ceiling for one update cycle. gRPC and REST calls carry their own 10s
-# timeouts; this is only the safety net around the whole pass.
-UPDATE_CYCLE_TIMEOUT = 60
+# Hard ceiling for one update cycle. It has to exceed the worst case the
+# transport layer can legitimately produce, or a degraded network makes every
+# cycle die here before any data lands. See REQUEST_BUDGET in
+# volvooncall_base: one REST call can spend up to
+# TIMEOUT * MAX_RETRIES + backoff, the auth pass and the vehicle listing are
+# sequential, and _parse_battery adds two more REST calls on top.
+UPDATE_CYCLE_TIMEOUT = 150
+# Upper bound on queued forced refreshes, so a burst of control commands
+# cannot pile up an unbounded backlog of real polls.
+MAX_PENDING_FORCE_REFRESHES = 8
+# Consecutive failed charge-limit stop attempts before backing off. Without
+# this the coordinator re-sends the stop every poll forever, one warning and
+# one extra REST round trip each time.
+CHARGE_LIMIT_STOP_MAX_FAILURES = 3
+CHARGE_LIMIT_STOP_BACKOFF_SECONDS = 30 * 60
+# Consecutive listBindCar responses a vehicle may be missing from before its
+# entities go unavailable. The object itself is kept so positional entity
+# lookups stay correct; only availability flips.
+VEHICLE_ABSENCE_GRACE_CYCLES = 3
 AUTH_STORE_VERSION = 1
 TOKEN_SAVE_DELAY_SECONDS = 5
 
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 FRONTEND_URL_PATH = f"/{DOMAIN}/frontend"
-CARD_RESOURCE_PATH = f"{FRONTEND_URL_PATH}/volvo-car-card.js"
-CARD_RESOURCE_URL = f"{CARD_RESOURCE_PATH}?v=2.0.2"
-CHARGING_CARD_RESOURCE_PATH = f"{FRONTEND_URL_PATH}/volvo-charging-card.js"
-CHARGING_CARD_RESOURCE_URL = f"{CHARGING_CARD_RESOURCE_PATH}?v=1.0.0"
-CARD_RESOURCES = (
-    (CARD_RESOURCE_PATH, CARD_RESOURCE_URL),
-    (CHARGING_CARD_RESOURCE_PATH, CHARGING_CARD_RESOURCE_URL),
-)
+CARD_FILENAMES = ("volvo-car-card.js", "volvo-charging-card.js")
 
 
-async def _async_register_card_resource(hass: HomeAssistant) -> None:
+def _card_resources() -> tuple[tuple[str, str], ...]:
+    """Return (path, cache-busted url) for each bundled Lovelace card.
+
+    The query parameter is derived from the file content instead of a
+    hand-maintained version string. A hand-written one silently drifts —
+    3.2.0 shipped volvo-car-card.js 2.2.0 behind "?v=2.0.2", so upgrading
+    users kept the browser-cached copy of the old card.
+
+    Runs blocking file reads; call it from an executor.
+    """
+    resources = []
+    for filename in CARD_FILENAMES:
+        resource_path = f"{FRONTEND_URL_PATH}/{filename}"
+        try:
+            digest = hashlib.sha256(
+                (FRONTEND_PATH / filename).read_bytes()
+            ).hexdigest()[:10]
+        except OSError as err:
+            _LOGGER.warning("Cannot read bundled card %s: %s", filename, err)
+            continue
+        resources.append((resource_path, f"{resource_path}?v={digest}"))
+    return tuple(resources)
+
+
+async def _async_register_card_resource(
+    hass: HomeAssistant, card_resources: tuple[tuple[str, str], ...]
+) -> None:
     """Register the bundled Lovelace cards when storage resources are used."""
     lovelace = hass.data.get(LOVELACE_DATA)
     if lovelace is None:
         _LOGGER.warning(
             "Lovelace is not loaded; add %s as module resources manually",
-            ", ".join(url for _, url in CARD_RESOURCES),
+            ", ".join(url for _, url in card_resources),
         )
         return
 
     if lovelace.resource_mode != MODE_STORAGE:
         _LOGGER.info(
             "Lovelace resources use YAML mode; add %s as module resources",
-            ", ".join(url for _, url in CARD_RESOURCES),
+            ", ".join(url for _, url in card_resources),
         )
         return
 
     resources = lovelace.resources
     await resources.async_get_info()
     items = resources.async_items() or []
-    for resource_path, resource_url in CARD_RESOURCES:
+    for resource_path, resource_url in card_resources:
         existing = next(
             (
                 item
@@ -124,18 +160,22 @@ async def _async_register_card_resource(hass: HomeAssistant) -> None:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Serve and register the bundled Volvo Home Assistant card."""
-    if not hasattr(hass, "http"):
+    """Serve and register the bundled Volvo Home Assistant cards."""
+    card_resources = await hass.async_add_executor_job(_card_resources)
+
+    # `hasattr` alone is not enough: the attribute exists but is None until
+    # the http component has been set up.
+    if getattr(hass, "http", None) is None:
         _LOGGER.warning(
             "Home Assistant HTTP component is unavailable; add %s manually",
-            CARD_RESOURCE_URL,
+            ", ".join(url for _, url in card_resources),
         )
         return True
 
     await hass.http.async_register_static_paths(
         [StaticPathConfig(FRONTEND_URL_PATH, str(FRONTEND_PATH), True)]
     )
-    await _async_register_card_resource(hass)
+    await _async_register_card_resource(hass, card_resources)
     return True
 
 
@@ -300,7 +340,12 @@ class VolvoCoordinator(DataUpdateCoordinator):
         self.supports_electric = powertrain_type == POWERTRAIN_HYBRID
         self.store_datas = []
         self._last_update_started_at = None
-        self._force_next_refresh = False
+        # Outstanding forced refreshes. A single boolean loses requests: two
+        # concurrent async_force_refresh() calls both set it, the first one
+        # through the update body consumes it, and its finally-clause then
+        # clears the second caller's request — which is silently downgraded
+        # to a throttled no-op. A counter gives every caller its own token.
+        self._pending_force_refreshes = 0
         self._update_lock = asyncio.Lock()
         # Vehicles and stores are keyed by VIN and reused across polls, so the
         # per-source fallback cache inside Vehicle survives between cycles and
@@ -312,6 +357,10 @@ class VolvoCoordinator(DataUpdateCoordinator):
         self._consecutive_failures = 0
         self._login_rejections = 0
         self._last_failure_reason = None
+        # VIN -> consecutive polls the car was missing from listBindCar.
+        self._absent_cycles = {}
+        # VIN -> (consecutive stop failures, monotonic time to retry after).
+        self._charge_limit_stop_failures = {}
 
     async def _async_get_vehicle_map(self):
         """Fetch the account's vehicles, re-authenticating once on 401/403.
@@ -350,6 +399,9 @@ class VolvoCoordinator(DataUpdateCoordinator):
         else:
             # The API object may have been replaced after an options change.
             vehicle._api = self.volvo_api
+        # listBindCar was already fetched for this poll; hand the names over
+        # so Vehicle.update() does not repeat the same request.
+        vehicle.apply_vehicle_info(vehicleInfos)
         return vehicle
 
     async def _store_for(self, vin):
@@ -360,6 +412,33 @@ class VolvoCoordinator(DataUpdateCoordinator):
             await store.load_create_data()
             self._stores[vin] = store
         return store
+
+    def _note_vehicle_presence(self, present_vins):
+        """Flag vehicles that have dropped out of the account listing.
+
+        The Vehicle object is deliberately kept in _vehicles and in the
+        emitted list: VolvoEntity falls back to a positional lookup, so
+        removing an entry would make a removed car's entities start showing
+        a *different* car's data. Only availability is flipped.
+        """
+        for vin, vehicle in self._vehicles.items():
+            if vin in present_vins:
+                self._absent_cycles.pop(vin, None)
+                vehicle.is_unbound = False
+                continue
+
+            absent = self._absent_cycles.get(vin, 0) + 1
+            self._absent_cycles[vin] = absent
+            if absent < VEHICLE_ABSENCE_GRACE_CYCLES:
+                continue
+            if not getattr(vehicle, "is_unbound", False):
+                _LOGGER.warning(
+                    "%s has been missing from the account listing for %s "
+                    "polls; marking its entities unavailable",
+                    vehicle_log_ref(vin),
+                    absent,
+                )
+            vehicle.is_unbound = True
 
     def _handle_update_failure(self, err):
         """Serve cached data during short outages, go unavailable on long ones."""
@@ -393,8 +472,10 @@ class VolvoCoordinator(DataUpdateCoordinator):
         """Fetch data from API endpoint with caching and failure grading."""
         async with self._update_lock:
             now = datetime.now(timezone.utc)
-            force_refresh = self._force_next_refresh
-            self._force_next_refresh = False
+            # Consume one forced-refresh token, if any caller queued one.
+            force_refresh = self._pending_force_refreshes > 0
+            if force_refresh:
+                self._pending_force_refreshes -= 1
             if (
                 not force_refresh
                 and self.data is not None
@@ -402,6 +483,16 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 and self.update_interval is not None
                 and now - self._last_update_started_at < self.update_interval
             ):
+                if self._consecutive_failures > FAILURE_GRACE_CYCLES:
+                    # The grace window is already exhausted and entities are
+                    # unavailable. Returning cached data here counts as a
+                    # successful update to DataUpdateCoordinator, so every
+                    # entity would come back to life showing stale values
+                    # without a single request having been made.
+                    raise UpdateFailed(
+                        "Error communicating with API: "
+                        f"{self._last_failure_reason}"
+                    )
                 _LOGGER.debug(
                     "Skipping Volvo refresh because the global scan interval "
                     "has not elapsed"
@@ -453,7 +544,12 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
                     # A vehicle missing from one listing (account hiccup, car
                     # resold) keeps its last object so entity indexes stay
-                    # valid; it simply stops receiving updates.
+                    # valid; it simply stops receiving updates. After
+                    # VEHICLE_ABSENCE_GRACE_CYCLES consecutive absences it is
+                    # treated as unbound and its entities go unavailable
+                    # instead of serving a frozen snapshot forever.
+                    self._note_vehicle_presence(set(vinVehicleMaps))
+
                     for vin in self._vehicle_order:
                         if vin in self._vehicles:
                             vehicles.append(self._vehicles[vin])
@@ -487,14 +583,19 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 return self._handle_update_failure(err)
 
     async def async_force_refresh(self):
-        """Refresh immediately after a control command, bypassing throttling."""
-        self._force_next_refresh = True
-        try:
-            await self.async_refresh()
-        finally:
-            # DataUpdateCoordinator can occasionally coalesce refresh calls.
-            # Never let a force flag leak into a later scheduled poll.
-            self._force_next_refresh = False
+        """Refresh immediately after a control command, bypassing throttling.
+
+        The request is a token consumed inside _async_update_data while it
+        holds the update lock, so concurrent callers cannot clear each
+        other's request the way a shared boolean did. A token can only leak
+        when the refresh never reaches the update body at all (shutdown),
+        and one leaked token costs one extra real poll later, so the counter
+        is simply capped rather than reconciled.
+        """
+        self._pending_force_refreshes = min(
+            self._pending_force_refreshes + 1, MAX_PENDING_FORCE_REFRESHES
+        )
+        await self.async_refresh()
 
     async def _async_enforce_charge_limit(self, vehicle, store_data):
         """Stop an active home-charge session once the SoC limit is reached.
@@ -519,6 +620,22 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
         home_charge_status = str(vehicle.home_charge_status or "").lower()
         if home_charge_status not in ("starting", "charging"):
+            self._charge_limit_stop_failures.pop(vehicle.vin, None)
+            return
+
+        failures, retry_after = self._charge_limit_stop_failures.get(
+            vehicle.vin, (0, 0.0)
+        )
+        now = time.monotonic()
+        if failures >= CHARGE_LIMIT_STOP_MAX_FAILURES and now < retry_after:
+            # Backing off: the pile keeps refusing. Re-sending every poll
+            # only produces one warning and one extra REST round trip per
+            # 30 seconds, indefinitely.
+            _LOGGER.debug(
+                "Skipping charge-limit stop for %s; backing off for %ds",
+                vehicle_log_ref(vehicle.vin),
+                int(retry_after - now),
+            )
             return
 
         _LOGGER.info(
@@ -529,12 +646,26 @@ class VolvoCoordinator(DataUpdateCoordinator):
         try:
             await vehicle.stop_home_charge()
         except Exception as err:
-            _LOGGER.warning(
-                "Failed to stop home charge for %s at the %d%% limit: %s",
+            failures += 1
+            self._charge_limit_stop_failures[vehicle.vin] = (
+                failures,
+                now + CHARGE_LIMIT_STOP_BACKOFF_SECONDS,
+            )
+            log = (
+                _LOGGER.error
+                if failures == CHARGE_LIMIT_STOP_MAX_FAILURES
+                else _LOGGER.warning
+            )
+            log(
+                "Failed to stop home charge for %s at the %d%% limit "
+                "(failure #%d): %s",
                 vehicle_log_ref(vehicle.vin),
                 limit,
+                failures,
                 redact_sensitive(err),
             )
+        else:
+            self._charge_limit_stop_failures.pop(vehicle.vin, None)
 
 metaMap = {
     "car_lock": {
@@ -1043,7 +1174,10 @@ class VolvoEntity(CoordinatorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.vehicle is not None
+        vehicle = self.vehicle
+        if vehicle is None or getattr(vehicle, "is_unbound", False):
+            return False
+        return super().available
 
     @property
     def icon(self):
