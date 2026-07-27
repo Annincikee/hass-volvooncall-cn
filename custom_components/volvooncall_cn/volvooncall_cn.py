@@ -68,8 +68,9 @@ GRPC_CHANNEL_OPTIONS = (
 )
 
 # How often each data source is refreshed, in poll cycles. Vehicle state that
-# can change at any moment is read every cycle; the rest is throttled, which
-# takes a 30s-interval install from ~12 requests per cycle down to ~7.
+# can change at any moment is read every cycle; the rest is throttled. For a
+# hybrid on the default 30s interval this takes a steady-state cycle from ~12
+# requests to ~9.3 on average — roughly 7,700 fewer requests per day per car.
 SOURCE_REFRESH_EVERY_CYCLES = {
     "health": 20,       # fluid/tyre warnings: ~10 min at a 30s interval
     "preference": 240,  # vehicle nickname: ~2 h
