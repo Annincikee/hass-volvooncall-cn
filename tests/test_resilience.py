@@ -197,6 +197,9 @@ async def test_coordinator_reauth_after_repeated_login_rejections(
         coordinator._pending_force_refreshes += 1
         result = await coordinator._async_update_data()
         assert result is coordinator.data
+        # Each rejection pauses polling; let that window elapse.
+        assert coordinator._auth_backoff_until_monotonic > 0
+        coordinator._auth_backoff_until_monotonic = 0.0
 
     coordinator._pending_force_refreshes += 1
     with pytest.raises(ConfigEntryAuthFailed):
@@ -208,13 +211,20 @@ async def test_revoked_session_recovers_within_one_cycle(hass: HomeAssistant):
     """A 403 on the vehicle list re-authenticates and retries immediately."""
     api = AsyncMock()
     api.get_vehicles_vins = AsyncMock(
-        side_effect=[VolvoAuthExpiredError("403"), {}]
+        side_effect=[
+            VolvoAuthExpiredError("403"),
+            {"TEST_VIN": {"modelYear": 2024}},
+        ]
     )
     coordinator = VolvoCoordinator(hass, api, 30)
 
-    result = await coordinator._async_update_data()
+    with patch(
+        "custom_components.volvooncall_cn.Vehicle.update",
+        new=AsyncMock(),
+    ):
+        result = await coordinator._async_update_data()
 
-    assert result == []
+    assert [vehicle.vin for vehicle in result] == ["TEST_VIN"]
     assert api.get_vehicles_vins.await_count == 2
     # login() ran once for the normal pass, update_token() ran once at the
     # start plus once for the in-cycle recovery.
@@ -260,3 +270,26 @@ async def test_entity_id_is_slugified(hass: HomeAssistant):
     assert entity.entity_id == "sensor.test_vin_12345678_odometer"
     assert entity.entity_id == entity.entity_id.lower()
     assert entity.unique_id == "TEST_VIN_12345678-odo_meter"
+
+
+def test_failed_vehicle_becomes_unavailable_during_other_vehicle_success():
+    """One healthy car must not keep a repeatedly failed car available."""
+    from homeassistant.const import Platform
+
+    from custom_components.volvooncall_cn import (
+        FAILURE_GRACE_CYCLES,
+        VolvoEntity,
+    )
+
+    vehicle = MagicMock()
+    vehicle.vin = "FAILED_VIN"
+    vehicle.is_unbound = False
+    vehicle._consecutive_failures = FAILURE_GRACE_CYCLES + 1
+    coordinator = MagicMock()
+    coordinator.data = [vehicle]
+    coordinator._vehicles = {vehicle.vin: vehicle}
+    coordinator.last_update_success = True
+
+    entity = VolvoEntity(coordinator, 0, "odo_meter", Platform.SENSOR)
+
+    assert entity.available is False

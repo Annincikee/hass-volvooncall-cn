@@ -1,11 +1,16 @@
 """Auth session tests: prefer the refresh token over password re-login."""
 
 import time
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.volvooncall_cn.volvooncall_base import VehicleBaseAPI
+from custom_components.volvooncall_cn.volvooncall_base import (
+    VehicleBaseAPI,
+    VolvoAuthExpiredError,
+    VolvoTransientError,
+)
 
 
 def _auth_payload(prefix, expires_in=1800):
@@ -46,6 +51,22 @@ async def test_update_token_refreshes_without_password_login():
 
 
 @pytest.mark.asyncio
+async def test_refresh_token_query_is_urlencoded():
+    """Reserved characters in a refresh token must stay inside its value."""
+    api = _api()
+    api._refresh_token = "refresh +&?=/token"
+    api._access_token_expire_at = int(time.time()) + 60
+    api.digitalvolvo_get.return_value = _auth_payload("refreshed")
+
+    await api.update_token()
+
+    refresh_url = api.digitalvolvo_get.await_args.args[0]
+    assert parse_qs(urlparse(refresh_url).query) == {
+        "refreshToken": ["refresh +&?=/token"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_login_is_a_noop_while_the_session_is_alive():
     """A valid session must not trigger a password login on every poll."""
     api = _api()
@@ -76,7 +97,9 @@ async def test_expired_refresh_token_falls_back_to_password_login():
     api = _api()
     api._refresh_token = "dead_refresh"
     api._access_token_expire_at = int(time.time()) + 60
-    api.digitalvolvo_get.side_effect = RuntimeError("refresh token expired")
+    api.digitalvolvo_get.side_effect = VolvoAuthExpiredError(
+        "refresh token expired"
+    )
     api.digitalvolvo_post.return_value = _auth_payload("recovered")
 
     await api.update_token()
@@ -85,6 +108,21 @@ async def test_expired_refresh_token_falls_back_to_password_login():
     api.digitalvolvo_post.assert_awaited_once()  # then password recovery
     assert "auth" in api.digitalvolvo_post.await_args.args[0]
     assert api._refresh_token == "recovered_refresh"
+
+
+@pytest.mark.asyncio
+async def test_login_preserves_refresh_token_on_transient_refresh_failure():
+    """Startup must not turn a temporary refresh outage into password auth."""
+    api = _api()
+    api._refresh_token = "still_valid_refresh"
+    api._access_token_expire_at = 0
+    api.digitalvolvo_get.side_effect = VolvoTransientError("service unavailable")
+
+    with pytest.raises(VolvoTransientError):
+        await api.login()
+
+    assert api._refresh_token == "still_valid_refresh"
+    api.digitalvolvo_post.assert_not_awaited()
 
 
 @pytest.mark.asyncio

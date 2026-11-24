@@ -58,6 +58,27 @@ PASSWORD_LOGIN_COOLDOWN = 120
 # Refresh the access token once it has less than this much lifetime left.
 TOKEN_REFRESH_HEADROOM = 60 * 10
 
+# Volvo answers 403 both for a dead token and while risk control is throttling
+# the account. A 403 from the refresh endpoint therefore keeps the refresh
+# token for this many consecutive attempts before it is treated as a real
+# rejection; discarding it on the first one turned a short risk-control streak
+# into password logins and, three of those later, a manual reauthentication.
+REFRESH_FORBIDDEN_TOLERANCE = 3
+
+# A gRPC UNAUTHENTICATED only forces a session refresh when the session is at
+# least this old. A token the server rejects right after issuing it is not
+# fixed by issuing another one, and refreshing every poll would hammer the
+# auth endpoint.
+GRPC_REAUTH_MIN_SESSION_AGE = 15 * 60
+
+SESSION_REQUIRED_FIELDS = (
+    "refreshToken",
+    "globalAccessToken",
+    "accessToken",
+    "jwtToken",
+    "expiresIn",
+)
+
 
 class VolvoAPIError(Exception):
     def __init__(self, message):
@@ -66,15 +87,48 @@ class VolvoAPIError(Exception):
 
 
 class VolvoApiHttpError(VolvoAPIError):
-    """Deterministic (non-auth) HTTP failure; retrying cannot help."""
+    """A non-auth HTTP failure."""
+
+
+class VolvoTransientError(VolvoApiHttpError):
+    """A temporary transport/server failure; password auth must not follow."""
+
+
+class VolvoRateLimitError(VolvoTransientError):
+    """The server rate-limited the request and may specify when to retry."""
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class VolvoAuthExpiredError(VolvoAPIError):
     """The server rejected our access token (401/403) before its expiry."""
 
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+class VolvoRefreshRejectedError(VolvoAuthExpiredError):
+    """The refresh endpoint explicitly rejected the stored refresh token."""
+
+
+class VolvoRefreshForbiddenError(VolvoAuthExpiredError):
+    """The refresh endpoint answered 403; the refresh token is kept for now."""
+
 
 class VolvoAuthError(VolvoAPIError):
     """The auth endpoint answered but rejected the account credentials."""
+
+
+class VolvoAuthForbiddenError(VolvoAuthError):
+    """The password endpoint answered 403.
+
+    That is how risk control throttles an account as well as how it refuses
+    one, so it is weaker evidence of a wrong password than an explicit
+    business rejection and is counted against a higher reauth threshold.
+    """
 
 
 class VolvoAuthThrottledError(VolvoAPIError):
@@ -85,31 +139,31 @@ def redact_sensitive(value):
     """Return a log-safe string without credentials or vehicle identifiers."""
     text = str(value)
     sensitive_keys = (
-        "authorization|password|refreshToken|X-Token|phone|phoneNumber|vin|"
-        "vinCode|deviceid|uuid|connectorId|orderNo|tradeNo|memberId|latitude|"
-        "longitude"
+        "authorization|password|refreshToken|accessToken|globalAccessToken|"
+        "jwtToken|X-Token|phone|phoneNumber|vin|vinCode|deviceid|uuid|"
+        "connectorId|orderNo|tradeNo|memberId|latitude|longitude"
+    )
+    # Redact quoted values first.  The old token-oriented pattern stopped at
+    # the first whitespace and leaked the remainder of values such as
+    # ``"accessToken": "secret token with spaces"``.
+    text = re.sub(
+        rf"((?:{sensitive_keys})['\"]?\s*[:=]\s*)(['\"])"
+        r"(?:\\.|(?!\2)[\s\S])*\2",
+        lambda match: (
+            f"{match.group(1)}{match.group(2)}<redacted>{match.group(2)}"
+        ),
+        text,
+        flags=re.IGNORECASE,
     )
     text = re.sub(
-        rf"((?:{sensitive_keys})=)[^&\s'\"]+",
+        r"(authorization['\"]?\s*[:=]\s*)Bearer\s+[^,'\"\s]+",
         r"\1<redacted>",
         text,
         flags=re.IGNORECASE,
     )
     text = re.sub(
-        r"(authorization['\"]?\s*[:=]\s*['\"]?Bearer\s+)[^,'\"\s]+",
-        r"\1<redacted>",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"(X-Token['\"]?\s*[:=]\s*['\"]?)[^,'\"\s]+",
-        r"\1<redacted>",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        rf"((?:{sensitive_keys})['\"]?\s*[:=]\s*['\"]?)"
-        r"[^,'\"\s]+",
+        rf"((?:{sensitive_keys})['\"]?\s*[:=]\s*)"
+        r"[^,&'\"\s}\]]+",
         r"\1<redacted>",
         text,
         flags=re.IGNORECASE,
@@ -137,6 +191,32 @@ def _retry_delay(attempt_index):
     return RETRY_BACKOFF_SECONDS[-1]
 
 
+def _retry_after_seconds(headers):
+    """Parse Retry-After as delta seconds or an HTTP date."""
+    if not headers:
+        return None
+    raw_value = headers.get("Retry-After")
+    if raw_value is None:
+        raw_value = headers.get("retry-after")
+    if raw_value is None:
+        return None
+    try:
+        seconds = float(raw_value)
+    except (TypeError, ValueError):
+        try:
+            from email.utils import parsedate_to_datetime
+
+            retry_at = parsedate_to_datetime(str(raw_value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
 def vehicle_log_ref(vin):
     """Return a stable, non-reversible reference suitable for log messages."""
     digest = hashlib.sha256(str(vin).encode("utf-8")).hexdigest()[:10]
@@ -155,9 +235,18 @@ class VehicleBaseAPI:
         self._vocapi_access_token = ""
         self._access_token_expire_at = 0
         self._last_password_login_at = 0
+        self._refresh_forbidden_streak = 0
+        # Monotonic time this process obtained the session; None for a
+        # session restored from disk, whose real age is unknown.
+        self._session_established_monotonic = None
         self._token_listener = None
         self._charge_piles_cache = {}
+        self._charge_pile_locks = {}
+        self._charge_pile_generations = {}
         self._charge_order_cache = {}
+        self._charge_order_locks = {}
+        self._charge_order_generations = {}
+        self._charge_order_global_generation = 0
 
     def set_token_listener(self, listener):
         """Register a callback invoked with export_tokens() after each auth."""
@@ -213,7 +302,25 @@ class VehicleBaseAPI:
         """
         self._refresh_token = ""
         self._access_token_expire_at = 0
+        self._refresh_forbidden_streak = 0
         self._notify_token_listener()
+
+    def note_grpc_unauthenticated(self):
+        """Mark the session dead after a gRPC UNAUTHENTICATED, if plausible.
+
+        REST 401/403 already invalidates the session, but the gRPC token can
+        be rejected on its own; without this every data source kept failing
+        until the scheduled refresh window. Returns True when the next auth
+        pass will rebuild the session.
+        """
+        established = self._session_established_monotonic
+        if (
+            established is not None
+            and time.monotonic() - established < GRPC_REAUTH_MIN_SESSION_AGE
+        ):
+            return False
+        self._access_token_expire_at = 0
+        return True
 
     def _notify_token_listener(self):
         if self._token_listener is None:
@@ -280,7 +387,27 @@ class VehicleBaseAPI:
                     _LOGGER.warning(
                         "Authentication rejected by server: %s", safe_message
                     )
-                    raise VolvoAuthExpiredError(safe_message) from None
+                    raise VolvoAuthExpiredError(
+                        safe_message, status=error.status
+                    ) from None
+                if error.status == 429:
+                    # Respect server-side rate limiting.  Replaying after the
+                    # generic 0.5/1s backoff creates extra traffic and almost
+                    # always lands inside the same limit window; the caller can
+                    # instead schedule a later coordinator refresh.
+                    retry_after = _retry_after_seconds(error.headers)
+                    _LOGGER.warning(
+                        "Request rate-limited by server%s: %s",
+                        (
+                            f"; retry after {retry_after:g}s"
+                            if retry_after is not None
+                            else ""
+                        ),
+                        safe_message,
+                    )
+                    raise VolvoRateLimitError(
+                        safe_message, retry_after=retry_after
+                    ) from None
                 if 400 <= error.status < 500 and error.status != 429:
                     # Deterministic client errors do not become successes on
                     # replay; retrying only hammers the API.
@@ -294,7 +421,7 @@ class VehicleBaseAPI:
                 if i < max_attempts - 1:
                     await asyncio.sleep(_retry_delay(i))
                 else:
-                    raise VolvoApiHttpError(safe_message) from None
+                    raise VolvoTransientError(safe_message) from None
             except Exception as error:
                 _LOGGER.warning(
                     "Failure when communicating with the server (%s): %s",
@@ -323,20 +450,67 @@ class VehicleBaseAPI:
         )
 
     def _store_session(self, data, now):
+        # Validate everything before touching any field. Assigning as we went
+        # raised a bare KeyError on an incomplete response and left the
+        # session half replaced: new tokens in memory, old expiry, nothing
+        # persisted.
+        if not isinstance(data, dict):
+            raise VolvoAPIError("Auth response carried no session data")
+        missing = [
+            field for field in SESSION_REQUIRED_FIELDS if not data.get(field)
+        ]
+        if missing:
+            raise VolvoAPIError(
+                "Auth response is missing " + ", ".join(missing)
+            )
+        try:
+            expires_in = int(data["expiresIn"])
+        except (TypeError, ValueError):
+            raise VolvoAPIError(
+                "Auth response carried an invalid expiresIn"
+            ) from None
+        if expires_in <= 0:
+            raise VolvoAPIError("Auth response carried an invalid expiresIn")
+
         self._refresh_token = data["refreshToken"]
         self._vocapi_access_token = data["globalAccessToken"]
         self._digitalvolvo_access_token = data["accessToken"]
         self._digitalvolvo_x_token = data["jwtToken"]
-        self._access_token_expire_at = now + int(data["expiresIn"])
+        self._access_token_expire_at = now + expires_in
+        self._refresh_forbidden_streak = 0
+        self._session_established_monotonic = time.monotonic()
         self._notify_token_listener()
 
     async def _refresh_access_token(self):
+        query = urllib.parse.urlencode({"refreshToken": self._refresh_token})
         url = urljoin(
             DIGITALVOLVO_URL,
-            "/app/iam/api/v1/refreshToken?refreshToken=" + self._refresh_token,
+            "/app/iam/api/v1/refreshToken?" + query,
         )
-        result = await self.digitalvolvo_get(url, {})
-        self._store_session(result["data"], int(time.time()))
+        try:
+            result = await self.digitalvolvo_get(url, {})
+        except VolvoTransientError:
+            raise
+        except (VolvoAuthExpiredError, VolvoApiHttpError, VolvoAPIError) as err:
+            if getattr(err, "status", None) == 403:
+                # 403 is also what risk control answers while it throttles
+                # the account, so a few of them are not yet proof that the
+                # refresh token is dead. Keep it and let the coordinator
+                # back off; only a persistent streak escalates.
+                self._refresh_forbidden_streak += 1
+                if self._refresh_forbidden_streak < REFRESH_FORBIDDEN_TOLERANCE:
+                    raise VolvoRefreshForbiddenError(
+                        err.message, status=403
+                    ) from None
+            # Only a response that explicitly rejects the refresh request is
+            # evidence that the stored refresh token is unusable.  Timeouts,
+            # rate limits and 5xx failures remain retryable and must preserve
+            # the session instead of escalating to a password login.
+            raise VolvoRefreshRejectedError(err.message) from None
+        self._store_session(
+            result.get("data") if isinstance(result, dict) else None,
+            int(time.time()),
+        )
 
     async def login(self):
         now = int(time.time())
@@ -355,9 +529,9 @@ class VehicleBaseAPI:
             try:
                 await self._refresh_access_token()
                 return
-            except Exception as err:
+            except VolvoRefreshRejectedError as err:
                 _LOGGER.warning(
-                    "Token refresh failed, re-authenticating with password: %s",
+                    "Refresh token rejected; re-authenticating with password: %s",
                     redact_sensitive(err),
                 )
                 self._discard_refresh_token()
@@ -385,8 +559,19 @@ class VehicleBaseAPI:
                 "password": self._password,
                 "phoneNumber": "0086" + self._username
             }, max_attempts=1)
-        except (VolvoAuthExpiredError, VolvoApiHttpError):
-            # Transport-level failures are not a verdict on the credentials.
+        except VolvoAuthExpiredError as err:
+            # On the password endpoint, 401/403 is a direct rejection rather
+            # than an expired bearer session. Classify it so the coordinator's
+            # bounded reauth thresholds can take effect; 403 gets its own
+            # class because risk control uses it for throttling too.
+            error_class = (
+                VolvoAuthForbiddenError if err.status == 403 else VolvoAuthError
+            )
+            raise error_class(
+                f"Login rejected by server: {err.message}"
+            ) from None
+        except VolvoApiHttpError:
+            # Other transport-level failures are not a verdict on credentials.
             raise
         except VolvoAPIError as err:
             # The auth endpoint answered and rejected the credentials.
@@ -426,11 +611,11 @@ class VehicleBaseAPI:
 
         try:
             await self._refresh_access_token()
-        except Exception as err:
+        except VolvoRefreshRejectedError as err:
             # The refresh token has itself expired or been revoked; drop it and
             # recover with a full password login.
             _LOGGER.warning(
-                "Token refresh failed, re-authenticating with password: %s",
+                "Refresh token rejected; re-authenticating with password: %s",
                 redact_sensitive(err),
             )
             self._discard_refresh_token()
@@ -442,28 +627,46 @@ class VehicleBaseAPI:
         if not result:
             return []
         if result.get('success', False):
-            return result.get('data', [])
+            return result.get('data') or []
 
         return []
 
     async def get_vehicles_vins(self):
         data = await self.get_vehicles()
         vins = {}
-        for k in data:
-            vinCode = k["vinCode"]
-            vins[vinCode] = k
+        for vehicle_info in data:
+            if not isinstance(vehicle_info, dict):
+                _LOGGER.warning(
+                    "Skipping a malformed non-object vehicle-list entry"
+                )
+                continue
+            vin_code = vehicle_info.get("vinCode")
+            if not isinstance(vin_code, str) or not vin_code.strip():
+                _LOGGER.warning(
+                    "Skipping a vehicle-list entry without a valid VIN"
+                )
+                continue
+            vins[vin_code] = vehicle_info
 
         return vins
 
     def _invalidate_charge_piles(self, vin=None):
         """Drop cached pile entries so the next read re-fetches the order id."""
-        self._charge_piles_cache.pop(vin or "", None)
+        key = vin or ""
+        self._charge_pile_generations[key] = (
+            self._charge_pile_generations.get(key, 0) + 1
+        )
+        self._charge_piles_cache.pop(key, None)
 
     def _invalidate_charge_orders(self, connector_id=None):
         """Drop cached order history so a just-ended session shows up at once."""
         if connector_id:
+            self._charge_order_generations[connector_id] = (
+                self._charge_order_generations.get(connector_id, 0) + 1
+            )
             self._charge_order_cache.pop(connector_id, None)
         else:
+            self._charge_order_global_generation += 1
             self._charge_order_cache.clear()
 
     async def get_charge_piles(
@@ -475,26 +678,54 @@ class VehicleBaseAPI:
         active order (tradeNo) that charging telemetry is keyed on.
         """
         key = vin or ""
-        now = time.time()
+        now = time.monotonic()
         cached = self._charge_piles_cache.get(key)
         if not force_refresh and cached and now < cached[1]:
             return cached[0]
 
-        query = {"phone": self._username}
-        if vin:
-            query["vin"] = vin
-        if series_code:
-            query["seriesCode"] = series_code
-        url = urljoin(
-            DIGITALVOLVO_URL,
-            "/app/charge-pile/api/v1/api/brandPile/getPileList?"
-            + urllib.parse.urlencode(query),
-        )
-        result = await self.digitalvolvo_get(url, {})
-        piles = result.get("data", {}).get("brandPileList", []) if result else []
+        lock = self._charge_pile_locks.setdefault(key, asyncio.Lock())
+        join_inflight = lock.locked()
+        async with lock:
+            # A concurrent reader may have populated the cache while this
+            # coroutine waited for the per-VIN single-flight lock.  A forced
+            # reader may also join that already-fresh in-flight request; it
+            # only starts another request when there was nothing to join.
+            now = time.monotonic()
+            cached = self._charge_piles_cache.get(key)
+            if (
+                cached
+                and now < cached[1]
+                and (not force_refresh or join_inflight)
+            ):
+                return cached[0]
 
-        self._charge_piles_cache[key] = (piles, now + CHARGE_PILE_CACHE_TTL)
-        return piles
+            generation = self._charge_pile_generations.get(key, 0)
+            query = {"phone": self._username}
+            if vin:
+                query["vin"] = vin
+            if series_code:
+                query["seriesCode"] = series_code
+            url = urljoin(
+                DIGITALVOLVO_URL,
+                "/app/charge-pile/api/v1/api/brandPile/getPileList?"
+                + urllib.parse.urlencode(query),
+            )
+            result = await self.digitalvolvo_get(url, {})
+            piles = (
+                (result.get("data") or {}).get("brandPileList") or []
+                if result
+                else []
+            )
+
+            # A control request may have invalidated this VIN while the GET
+            # was in flight.  Return its response to its original caller but
+            # never let that old response resurrect the invalidated cache.
+            if self._charge_pile_generations.get(key, 0) == generation:
+                self._charge_piles_cache[key] = (
+                    piles,
+                    time.monotonic() + CHARGE_PILE_CACHE_TTL,
+                )
+            return piles
 
     async def get_active_trade_no(
         self, vin, series_code=None, *, force_refresh=False
@@ -634,39 +865,55 @@ class VehicleBaseAPI:
         if not connector_id:
             return []
 
-        now = time.time()
+        now = time.monotonic()
         cached = self._charge_order_cache.get(connector_id)
         if cached and now < cached[1]:
             return cached[0]
-        url = urljoin(
-            DIGITALVOLVO_URL,
-            "/app/charge-pile/api/v1/api/brandHomePile/queryList",
+        lock = self._charge_order_locks.setdefault(
+            connector_id, asyncio.Lock()
         )
-        result = await self.digitalvolvo_post(
-            url,
-            {},
-            {
-                "tradeNo": None,
-                "orderNo": None,
-                "phone": None,
-                "memberId": None,
-                "vin": None,
-                "serviceProvider": None,
-                "stationId": None,
-                "stationName": None,
-                "connectorId": connector_id,
-                "startupType": None,
-                "startTime": None,
-                "endTime": None,
-                "mainStatus": None,
-            },
-        )
-        orders = (result.get("data") if result else None) or []
-        self._charge_order_cache[connector_id] = (
-            orders,
-            now + CHARGE_ORDER_CACHE_TTL,
-        )
-        return orders
+        async with lock:
+            now = time.monotonic()
+            cached = self._charge_order_cache.get(connector_id)
+            if cached and now < cached[1]:
+                return cached[0]
+
+            global_generation = self._charge_order_global_generation
+            generation = self._charge_order_generations.get(connector_id, 0)
+            url = urljoin(
+                DIGITALVOLVO_URL,
+                "/app/charge-pile/api/v1/api/brandHomePile/queryList",
+            )
+            result = await self.digitalvolvo_post(
+                url,
+                {},
+                {
+                    "tradeNo": None,
+                    "orderNo": None,
+                    "phone": None,
+                    "memberId": None,
+                    "vin": None,
+                    "serviceProvider": None,
+                    "stationId": None,
+                    "stationName": None,
+                    "connectorId": connector_id,
+                    "startupType": None,
+                    "startTime": None,
+                    "endTime": None,
+                    "mainStatus": None,
+                },
+            )
+            orders = (result.get("data") if result else None) or []
+            if (
+                self._charge_order_global_generation == global_generation
+                and self._charge_order_generations.get(connector_id, 0)
+                == generation
+            ):
+                self._charge_order_cache[connector_id] = (
+                    orders,
+                    time.monotonic() + CHARGE_ORDER_CACHE_TTL,
+                )
+            return orders
 
     async def set_plug_and_charge(
         self, enabled: bool, vin=None, series_code=None

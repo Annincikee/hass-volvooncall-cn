@@ -140,8 +140,8 @@ async def test_charge_pile_cannot_override_battery_service_values():
 
 
 @pytest.mark.asyncio
-async def test_battery_failure_clears_vehicle_values_and_marks_degraded():
-    """Pile availability must not hide a BatteryService failure."""
+async def test_battery_failure_preserves_last_good_snapshot_and_generation():
+    """Pile success must not replace or advance failed BatteryService data."""
     api = MagicMock()
     api.get_battery_status = AsyncMock(
         return_value=GetBatteryResponse(
@@ -162,15 +162,64 @@ async def test_battery_failure_clears_vehicle_values_and_marks_degraded():
             "status": {},
         }
     )
-    api.get_charge_order_list = AsyncMock(return_value=[])
+    api.get_charge_order_list = AsyncMock(
+        side_effect=[
+            [{"orderNo": "OLD_ORDER", "chargeUsePower": "4.2"}],
+            [],
+        ]
+    )
     vehicle = Vehicle("TEST_VIN", api, True)
 
     await vehicle._parse_battery()
+    battery_generation = vehicle._data_source_generation["battery"]
+    pile_generation = vehicle._data_source_generation["charge_pile"]
+    assert vehicle.last_charge_order["order_no"] == "OLD_ORDER"
+
     api.get_battery_status.side_effect = RuntimeError("UNAVAILABLE")
+    api.get_charge_pile_status.return_value = {
+        "pile": {
+            "equipmentName": "Test Home Charger",
+            "connectorStatus": 2,
+        },
+        "status": {},
+    }
     await vehicle._parse_battery()
 
-    assert vehicle.battery_charge_level_percentage is None
-    assert vehicle.electric_range is None
+    assert vehicle.battery_charge_level_percentage == 76.5
+    assert vehicle.electric_range == 54
     assert vehicle._data_source_status["battery"] is False
     assert vehicle._data_source_status["charge_pile"] is True
+    assert vehicle._data_source_generation["battery"] == battery_generation
+    assert vehicle._data_source_generation["charge_pile"] > pile_generation
+    assert vehicle.last_charge_order is None
+    assert vehicle.plug_and_charge_enabled is None
     assert vehicle.connection_status == "Degraded (1 sources failed)"
+
+
+@pytest.mark.asyncio
+async def test_non_finite_battery_telemetry_does_not_replace_good_snapshot():
+    api = MagicMock()
+    api.get_battery_status = AsyncMock(
+        return_value=GetBatteryResponse(
+            vin="TEST_VIN",
+            battery=Battery(
+                batteryChargeLevelPercentage=72,
+                estimatedDistanceToEmptyKm=50,
+            ),
+        )
+    )
+    api.get_charge_pile_status = AsyncMock(return_value=None)
+    api.get_charge_order_list = AsyncMock(return_value=[])
+    vehicle = Vehicle("TEST_VIN", api, True)
+    await vehicle._parse_battery()
+    generation = vehicle._data_source_generation["battery"]
+
+    api.get_battery_status.return_value = GetBatteryResponse(
+        vin="TEST_VIN",
+        battery=Battery(batteryChargeLevelPercentage=float("nan")),
+    )
+    await vehicle._parse_battery()
+
+    assert vehicle.battery_charge_level_percentage == 72
+    assert vehicle._data_source_status["battery"] is False
+    assert vehicle._data_source_generation["battery"] == generation

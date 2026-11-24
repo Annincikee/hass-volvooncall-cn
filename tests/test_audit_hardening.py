@@ -6,7 +6,6 @@ the symptom keeps the reason for the fix discoverable from a failure message.
 
 import asyncio
 import time
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +17,7 @@ from custom_components.volvooncall_cn import (
     CHARGE_LIMIT_STOP_MAX_FAILURES,
     FAILURE_GRACE_CYCLES,
     UPDATE_CYCLE_TIMEOUT,
+    VEHICLE_BATCH_TIMEOUT,
     VEHICLE_ABSENCE_GRACE_CYCLES,
     VolvoCoordinator,
     _card_resources,
@@ -29,6 +29,8 @@ from custom_components.volvooncall_cn.volvooncall_base import (
     PASSWORD_LOGIN_COOLDOWN,
     REQUEST_BUDGET,
     VehicleBaseAPI,
+    VolvoAuthExpiredError,
+    VolvoRateLimitError,
     VolvoAuthThrottledError,
 )
 from custom_components.volvooncall_cn.volvooncall_cn import (
@@ -246,7 +248,7 @@ async def test_throttled_refresh_does_not_resurrect_failed_entities(
     assert coordinator._consecutive_failures > FAILURE_GRACE_CYCLES
 
     # Now a throttled (non-forced) refresh arrives inside the interval.
-    coordinator._last_update_started_at = datetime.now(timezone.utc)
+    coordinator._last_update_started_at = time.monotonic()
     with pytest.raises(UpdateFailed):
         await coordinator._async_update_data()
 
@@ -257,8 +259,103 @@ async def test_update_cycle_timeout_covers_the_transport_budget():
     A 60s cap against a ~33s worst case per REST call meant a degraded
     network killed every cycle in the auth + vehicle-listing phase alone.
     """
-    # login/update_token, the vehicle listing, and two charge-pile calls.
-    assert UPDATE_CYCLE_TIMEOUT >= REQUEST_BUDGET * 4
+    # login/update_token, vehicle listing, three sequential home-charge REST
+    # calls, and one bounded charge-stop mutation.
+    assert UPDATE_CYCLE_TIMEOUT >= REQUEST_BUDGET * 6
+    assert VEHICLE_BATCH_TIMEOUT >= REQUEST_BUDGET * 5
+
+
+async def test_multi_vehicle_updates_use_bounded_concurrency(
+    hass: HomeAssistant,
+):
+    """A slow first car must not prevent the second car from starting."""
+    api = AsyncMock()
+    api.login = AsyncMock()
+    api.update_token = AsyncMock()
+    vins = ("TESTVIN0000000001", "TESTVIN0000000002")
+    api.get_vehicles_vins = AsyncMock(
+        return_value={vin: {"modelYear": 2024} for vin in vins}
+    )
+    coordinator = VolvoCoordinator(hass, api, 30, "b4_b5_b6")
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+
+    async def blocked_update():
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await release.wait()
+
+    vehicles = {}
+    for vin in vins:
+        vehicle = FakeVehicle(vin)
+        vehicle.update = AsyncMock(side_effect=blocked_update)
+        vehicles[vin] = vehicle
+    coordinator._vehicles.update(vehicles)
+    coordinator._vehicle_order.extend(vins)
+
+    update_task = asyncio.create_task(coordinator._async_update_data())
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    release.set()
+    result = await update_task
+
+    assert [vehicle.vin for vehicle in result] == list(vins)
+
+
+async def test_all_vehicle_updates_failing_marks_coordinator_failed(
+    hass: HomeAssistant,
+):
+    """Swallowed source failures must not turn into a successful poll."""
+    coordinator = _coordinator(hass)
+    vehicle = FakeVehicle()
+    vehicle.update = AsyncMock(side_effect=RuntimeError("all sources failed"))
+    coordinator._vehicles[VIN] = vehicle
+    coordinator._vehicle_order.append(VIN)
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+    assert vehicle._consecutive_failures == 1
+    assert coordinator._consecutive_failures == 1
+
+
+async def test_coordinator_respects_server_retry_after(hass: HomeAssistant):
+    api = AsyncMock()
+    api.login = AsyncMock(side_effect=VolvoRateLimitError("busy", 120))
+    coordinator = VolvoCoordinator(hass, api, 30)
+    cached = [FakeVehicle()]
+    coordinator.data = cached
+
+    assert await coordinator._async_update_data() is cached
+    coordinator._pending_force_refreshes += 1
+    assert await coordinator._async_update_data() is cached
+
+    api.login.assert_awaited_once()
+    assert coordinator._server_retry_after_monotonic > time.monotonic()
+
+
+def test_new_vehicle_schedules_one_reload_and_tolerates_bad_model_year(
+    hass: HomeAssistant,
+):
+    entry = MagicMock()
+    entry.entry_id = "entry-id"
+    coordinator = VolvoCoordinator(
+        hass, AsyncMock(), 30, config_entry=entry
+    )
+    coordinator.data = [FakeVehicle("EXISTINGVIN")]
+
+    with patch.object(
+        hass.config_entries, "async_schedule_reload"
+    ) as reload_entry:
+        first = coordinator._vehicle_for(
+            "NEWVIN1", {"modelYear": "not-a-year"}
+        )
+        coordinator._vehicle_for("NEWVIN2", {"modelYear": None})
+
+    assert first.isAaos is False
+    reload_entry.assert_called_once_with("entry-id")
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +507,12 @@ async def test_rejected_refresh_token_is_dropped_from_storage():
     api._notify_token_listener()
     assert persisted["refresh_token"] == "DEAD"
 
-    api.digitalvolvo_get = AsyncMock(side_effect=Exception("401"))
-    api._request_digitalvolvo = AsyncMock(side_effect=Exception("401"))
+    api.digitalvolvo_get = AsyncMock(
+        side_effect=VolvoAuthExpiredError("401")
+    )
+    api._request_digitalvolvo = AsyncMock(
+        side_effect=VolvoAuthExpiredError("401")
+    )
     with pytest.raises(Exception):
         await api.login()
 
@@ -698,6 +799,9 @@ async def test_manifest_declares_generated_protobuf_runtime():
     import pathlib
     import re
 
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
     component = (
         pathlib.Path(__file__).resolve().parents[1]
         / "custom_components"
@@ -717,8 +821,17 @@ async def test_manifest_declares_generated_protobuf_runtime():
         assert match, f"{path.name} has no protobuf generator version"
         generated_versions.add(match.group(1))
 
-    required = max(
-        generated_versions,
-        key=lambda value: tuple(map(int, value.split("."))),
+    generated_minimum = max(Version(value) for value in generated_versions)
+    protobuf_requirement = next(
+        Requirement(requirement)
+        for requirement in requirements
+        if Requirement(requirement).name == "protobuf"
     )
-    assert f"protobuf>={required}" in requirements
+    declared_lower_bounds = [
+        Version(specifier.version)
+        for specifier in protobuf_requirement.specifier
+        if specifier.operator in {">", ">=", "==", "==="}
+    ]
+
+    assert declared_lower_bounds
+    assert max(declared_lower_bounds) >= generated_minimum

@@ -98,6 +98,9 @@ async def test_fuel_vehicle_does_not_poll_battery_or_charge_pile():
         "_parse_car_preference",
     ):
         setattr(vehicle, method_name, AsyncMock())
+    vehicle._parse_exterior.side_effect = lambda: vehicle._save_to_cache(
+        "exterior", {"car_locked": True}
+    )
 
     await vehicle.update()
 

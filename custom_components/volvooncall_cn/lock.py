@@ -69,7 +69,7 @@ class VolvoSensor(VolvoEntity, LockEntity):
         await async_confirm_vehicle_state(
             self.coordinator,
             lambda: self.is_locked == is_locked,
-            retry_delay=1,
+            retry_delay=2,
             description="Vehicle lock",
             source_is_fresh=lambda: vehicle_sources_are_fresh(
                 self.vehicle, "exterior"
@@ -101,18 +101,21 @@ class VolvoWindowSensor(VolvoEntity, LockEntity):
             return None
         window_keys = ["front_left_window_open", "front_right_window_open",
                        "rear_right_window_open", "rear_left_window_open"]
-        for window in window_keys:
-            is_open = vehicle.get(window)
-            _LOGGER.debug("%s %s", window, is_open)
-            if is_open:
-                return False
+        states = [vehicle.get(window) for window in window_keys]
+        _LOGGER.debug("window states: %s", states)
+        if any(states):
+            return False
+        # A window whose state is unknown (never read, or its snapshot
+        # expired) must not be reported as closed.
+        if any(state is None for state in states):
+            return None
         return True
 
     async def _update_status(self, is_locked):
         await async_confirm_vehicle_state(
             self.coordinator,
             lambda: self.is_locked == is_locked,
-            retry_delay=5,
+            retry_delay=4,
             description="Window control",
             source_is_fresh=lambda: vehicle_sources_are_fresh(
                 self.vehicle, "exterior"

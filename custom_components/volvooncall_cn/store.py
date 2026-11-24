@@ -51,7 +51,8 @@ class VolvoStore(Store[StoreData]):
         )
 
     def get(self, key):
-        assert self.data is not None
+        if self.data is None:
+            raise RuntimeError("VolvoStore must be loaded before reading data")
         return self.data.get(key)
 
     async def _async_migrate_legacy(self) -> StoreData | None:

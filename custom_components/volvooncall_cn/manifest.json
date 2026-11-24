@@ -17,9 +17,9 @@
     "iot_class": "cloud_polling",
     "requirements": [
         "grpcio>=1.67.1",
-        "protobuf>=5.27.2"
+        "protobuf>=6.33.5"
     ],
-    "version": "3.2.1",
+    "version": "3.2.2",
     "loggers": [
         "volvooncall_cn"
     ]

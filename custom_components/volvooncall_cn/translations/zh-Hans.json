@@ -6,8 +6,9 @@
                 "data": {
                     "username": "手机号(11位数字)",
                     "password": "密码",
-                    "scan_interval": "扫描间隔(单位秒，最小30)",
-                    "powertrain_type": "动力类型（轻混/纯油 或 混动）"
+                    "scan_interval": "扫描间隔(单位秒，最小30；未开启动态轮询时使用)",
+                    "powertrain_type": "动力类型（轻混/纯油 或 混动）",
+                    "dynamic_polling": "动态轮询（用车/充电/白天/夜间分别设置间隔，可在集成“配置”中调整）"
                 }
             },
             "reauth_confirm": {
@@ -19,7 +20,9 @@
         },
         "error": {
             "missing_credentials": "手机号和密码不能为空。",
-            "unknown": "发生未知错误，请重试。"
+            "account_already_configured": "该车辆账户已配置。",
+            "unknown": "发生未知错误，请重试。",
+            "login_cooldown": "刚刚已尝试过登录。为避免触发账号风控，请等待约 2 分钟后再试。"
         },
         "abort": {
             "reauth_successful": "重新认证成功。",
@@ -29,14 +32,42 @@
     "options": {
         "step": {
             "user": {
-                "description": "修改账号、扫描间隔和车辆动力类型",
+                "description": "修改密码、扫描间隔和车辆动力类型；密码留空表示保持不变。开启动态轮询后，扫描间隔会随时段和车辆状态自动切换；多个条件同时满足时取最短间隔。",
                 "data": {
-                    "username": "手机号(11位数字)",
-                    "password": "密码",
-                    "scan_interval": "扫描间隔(单位秒，最小30)",
-                    "powertrain_type": "动力类型（轻混/纯油 或 混动）"
+                    "password": "新密码（可留空）",
+                    "scan_interval": "扫描间隔(单位秒，最小30；未开启动态轮询时使用)",
+                    "powertrain_type": "动力类型（轻混/纯油 或 混动）",
+                    "dynamic_polling": "动态轮询（用车/充电/白天/夜间分别设置间隔）"
+                },
+                "sections": {
+                    "dynamic_polling_settings": {
+                        "name": "动态轮询设置",
+                        "description": "仅在开启动态轮询时生效。间隔单位为秒（30～3600）。",
+                        "data": {
+                            "in_use_scan_interval": "用车间隔(秒)",
+                            "in_use_windows": "用车时间段",
+                            "charging_scan_interval": "充电间隔(秒)",
+                            "day_scan_interval": "白天间隔(秒)",
+                            "day_start": "白天开始时间",
+                            "night_scan_interval": "夜间间隔(秒)",
+                            "night_start": "夜间开始时间"
+                        },
+                        "data_description": {
+                            "in_use_scan_interval": "在下方用车时间段内，以及检测到引擎运行时（熄火后再保持 5 分钟）使用。",
+                            "in_use_windows": "用逗号分隔的 HH:MM-HH:MM，例如 07:00-09:00,17:00-19:30；留空则只按引擎状态判断。",
+                            "charging_scan_interval": "车辆充电期间使用，夜间充电同样生效。"
+                        }
+                    }
                 }
             }
+        },
+        "error": {
+            "login_cooldown": "刚刚已尝试过登录。为避免触发账号风控，请等待约 2 分钟后再试。",
+            "account_already_configured": "该车辆账户已配置。",
+            "missing_credentials": "手机号和密码不能为空。",
+            "unknown": "发生未知错误，请重试。",
+            "invalid_day_night_time": "白天开始时间和夜间开始时间必须是有效且不同的时间。",
+            "invalid_in_use_windows": "用车时间段格式应为 07:00-09:00,17:00-19:30。"
         }
     },
     "entity": {
@@ -334,6 +365,19 @@
                     },
                     "cache_info": {
                         "name": "缓存信息"
+                    },
+                    "polling_mode": {
+                        "name": "轮询模式",
+                        "state": {
+                            "fixed": "固定",
+                            "in_use": "用车",
+                            "charging": "充电",
+                            "day": "白天",
+                            "night": "夜间"
+                        }
+                    },
+                    "polling_interval": {
+                        "name": "当前轮询间隔(秒)"
                     }
                 }
             }

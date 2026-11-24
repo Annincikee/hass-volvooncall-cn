@@ -89,8 +89,7 @@ async def test_command_creates_channel_on_demand():
 
 @pytest.mark.asyncio
 async def test_lock_entity_survives_failed_first_poll(hass: HomeAssistant):
-    """Even if every data poll failed before channel creation, pressing the
-    lock must not raise the NoneType unary_stream error."""
+    """An all-source first-poll failure must not publish default lock state."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -107,30 +106,12 @@ async def test_lock_entity_survives_failed_first_poll(hass: HomeAssistant):
         raise Exception("simulated failure before channel creation")
 
     with patch.object(VehicleBaseAPI, "_request_digitalvolvo", fake_rest):
-        # First poll: channel creation fails, entities are still created.
         with patch.object(VehicleAPI, "get_channel", boom):
-            assert await hass.config_entries.async_setup(entry.entry_id)
+            assert not await hass.config_entries.async_setup(entry.entry_id)
             await hass.async_block_till_done()
 
-        coordinator = hass.data[DOMAIN][entry.entry_id]
-        vehicle = coordinator.data[0]
-        assert vehicle._api.channel is None
-        assert hass.states.get(f"lock.{VIN.lower()}_lock") is not None
-
-        # The command must now self-heal the channel; only the RPC itself
-        # may fail (dead endpoint), never stub construction.
-        with patch(
-            "custom_components.volvooncall_cn.volvooncall_cn.GRPC_DIGITALVOLVO_HOST",
-            DEAD_GRPC_TARGET,
-        ):
-            try:
-                await vehicle.lock_vehicle()
-            except AttributeError as err:
-                pytest.fail(f"stub built from a None channel: {err}")
-            except Exception:
-                pass
-
-        assert vehicle._api.channel is not None
+        assert entry.entry_id not in hass.data.get(DOMAIN, {})
+        assert hass.states.get(f"lock.{VIN.lower()}_lock") is None
 
 
 @pytest.mark.asyncio
