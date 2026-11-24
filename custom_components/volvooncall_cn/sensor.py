@@ -75,21 +75,21 @@ class VolvoSensor(VolvoEntity, SensorEntity):
     def __init__(self, coordinator, idx, metaMapKey):
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
+        self._update_from_coordinator()
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
+    def _update_from_coordinator(self) -> bool:
+        """Copy the already-fetched first-refresh data into entity attrs."""
         vehicle = self.vehicle
         if vehicle is None:
-            return
+            return False
         self._attr_native_value = vehicle.get(self.metaMapKey)
         self._attr_native_unit_of_measurement = metaMap[self.metaMapKey]["unit"]
-        # Set state_class if defined in metaMap
         if "state_class" in metaMap[self.metaMapKey]:
             self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
-        # Set entity_category if defined in metaMap
         if "entity_category" in metaMap[self.metaMapKey]:
-            self._attr_entity_category = metaMap[self.metaMapKey]["entity_category"]
+            self._attr_entity_category = metaMap[self.metaMapKey][
+                "entity_category"
+            ]
         if self.metaMapKey in {
             "battery_charging_status",
             "charger_connection_status",
@@ -101,6 +101,13 @@ class VolvoSensor(VolvoEntity, SensorEntity):
                 "plug_and_charge_enabled": vehicle.plug_and_charge_enabled,
                 "last_charge_order": vehicle.last_charge_order,
             }
+        return True
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if not self._update_from_coordinator():
+            return
         self.async_write_ha_state()
 
 
@@ -112,20 +119,37 @@ class VolvoConnectionStatusSensor(VolvoEntity, SensorEntity):
         super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
         # Set entity_category to diagnostic
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._update_from_coordinator()
+
+    def _update_from_coordinator(self) -> bool:
+        vehicle = self.vehicle
+        if vehicle is None:
+            return False
+        self._attr_native_value = vehicle.connection_status
+        self._attr_extra_state_attributes = {
+            "last_update_time": (
+                vehicle.last_update_time.isoformat()
+                if vehicle.last_update_time
+                else None
+            ),
+            "consecutive_failures": vehicle._consecutive_failures,
+            "cache_info": vehicle.get_cache_info(),
+            # Which dynamic-polling mode chose the current interval ("fixed"
+            # when dynamic polling is off) and how long until the next poll.
+            "polling_mode": getattr(self.coordinator, "polling_mode", None),
+            "polling_interval": (
+                round(self.coordinator.update_interval.total_seconds())
+                if getattr(self.coordinator, "update_interval", None)
+                else None
+            ),
+        }
+        return True
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        vehicle = self.vehicle
-        if vehicle is None:
+        if not self._update_from_coordinator():
             return
-        self._attr_native_value = vehicle.connection_status
-        # Add last_update_time as an attribute
-        self._attr_extra_state_attributes = {
-            "last_update_time": vehicle.last_update_time.isoformat() if vehicle.last_update_time else None,
-            "consecutive_failures": vehicle._consecutive_failures,
-            "cache_info": vehicle.get_cache_info(),
-        }
         self.async_write_ha_state()
 
 
@@ -135,19 +159,14 @@ class VolvoFullChargeRangeSensor(VolvoEntity, SensorEntity):
     def __init__(self, coordinator, idx, metaMapKey):
         """Initialize the full-charge range sensor."""
         super().__init__(coordinator, idx, metaMapKey, Platform.SENSOR)
+        self._update_from_store()
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Publish the most recent persisted full-charge range sample."""
+    def _update_from_store(self) -> bool:
         store_data = self._get_store()
         if store_data is None:
-            return
-        self._attr_native_value = store_data.get(
-            "full_charge_electric_range"
-        )
-        self._attr_native_unit_of_measurement = metaMap[self.metaMapKey][
-            "unit"
-        ]
+            return False
+        self._attr_native_value = store_data.get("full_charge_electric_range")
+        self._attr_native_unit_of_measurement = metaMap[self.metaMapKey]["unit"]
         self._attr_state_class = metaMap[self.metaMapKey]["state_class"]
         self._attr_extra_state_attributes = {
             "sampled_at": store_data.get("full_charge_sampled_at"),
@@ -155,4 +174,11 @@ class VolvoFullChargeRangeSensor(VolvoEntity, SensorEntity):
             "data_source": store_data.get("full_charge_data_source"),
             "trigger_battery_level": 100,
         }
+        return True
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Publish the most recent persisted full-charge range sample."""
+        if not self._update_from_store():
+            return
         self.async_write_ha_state()

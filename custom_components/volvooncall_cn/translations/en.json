@@ -6,8 +6,9 @@
                 "data": {
                     "username": "Username",
                     "password": "Password",
-                    "scan_interval": "Scan Interval(s, minimum 30)",
-                    "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)"
+                    "scan_interval": "Scan Interval(s, minimum 30; used when dynamic polling is off)",
+                    "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)",
+                    "dynamic_polling": "Dynamic polling (in use / charging / day / night; tune it in the integration's Configure dialog)"
                 }
             },
             "reauth_confirm": {
@@ -19,7 +20,9 @@
         },
         "error": {
             "missing_credentials": "Username and password are both required.",
-            "unknown": "Unexpected error, please try again."
+            "unknown": "Unexpected error, please try again.",
+            "login_cooldown": "A login was attempted moments ago. Wait about two minutes before trying again, to avoid tripping account risk control.",
+            "account_already_configured": "This vehicle account is already configured."
         },
         "abort": {
             "reauth_successful": "Re-authentication was successful.",
@@ -29,14 +32,43 @@
     "options": {
         "step": {
             "user": {
-                "description": "Update account, polling, and vehicle powertrain settings",
+                "description": "Update password, polling, and vehicle powertrain settings. Leave password blank to keep it unchanged. With dynamic polling on, the interval follows the time of day and what the car is doing; when several conditions apply the shortest interval is used.",
                 "data": {
                     "username": "Username",
                     "password": "Password",
-                    "scan_interval": "Scan Interval(s, minimum 30)",
-                    "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)"
+                    "scan_interval": "Scan Interval(s, minimum 30; used when dynamic polling is off)",
+                    "powertrain_type": "Powertrain (fuel/mild hybrid or hybrid)",
+                    "dynamic_polling": "Dynamic polling (in use / charging / day / night)"
+                },
+                "sections": {
+                    "dynamic_polling_settings": {
+                        "name": "Dynamic polling settings",
+                        "description": "Only used when dynamic polling is on. Intervals are in seconds (30-3600).",
+                        "data": {
+                            "in_use_scan_interval": "In-use interval (s)",
+                            "in_use_windows": "In-use time windows",
+                            "charging_scan_interval": "Charging interval (s)",
+                            "day_scan_interval": "Daytime interval (s)",
+                            "day_start": "Day starts at",
+                            "night_scan_interval": "Night interval (s)",
+                            "night_start": "Night starts at"
+                        },
+                        "data_description": {
+                            "in_use_scan_interval": "Used inside the windows below and whenever the engine is running, plus 5 minutes after it stops.",
+                            "in_use_windows": "Comma-separated HH:MM-HH:MM ranges, e.g. 07:00-09:00,17:00-19:30. Leave empty to rely on engine state only.",
+                            "charging_scan_interval": "Used while the car is charging, including at night."
+                        }
+                    }
                 }
             }
+        },
+        "error": {
+            "login_cooldown": "A login was attempted moments ago. Wait about two minutes before trying again, to avoid tripping account risk control.",
+            "account_already_configured": "This vehicle account is already configured.",
+            "missing_credentials": "Username and password are both required.",
+            "unknown": "Unexpected error, please try again.",
+            "invalid_day_night_time": "Day start and night start must be valid, different times.",
+            "invalid_in_use_windows": "In-use windows must look like 07:00-09:00,17:00-19:30."
         }
     },
     "entity": {
@@ -334,6 +366,19 @@
                     },
                     "cache_info": {
                         "name": "Cache Info"
+                    },
+                    "polling_mode": {
+                        "name": "Polling mode",
+                        "state": {
+                            "fixed": "Fixed",
+                            "in_use": "In use",
+                            "charging": "Charging",
+                            "day": "Day",
+                            "night": "Night"
+                        }
+                    },
+                    "polling_interval": {
+                        "name": "Polling interval (s)"
                     }
                 }
             }

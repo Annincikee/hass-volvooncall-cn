@@ -3,11 +3,14 @@ import datetime
 import grpc
 from grpc import aio as grpc_aio
 import asyncio
+import math
+import time
 from datetime import datetime as dt, timedelta, timezone
 from typing import Dict, Any
 from homeassistant.exceptions import HomeAssistantError
 from .volvooncall_base import (
     VehicleBaseAPI,
+    VolvoAPIError,
     gcj02towgs84,
     redact_sensitive,
     vehicle_log_ref,
@@ -40,7 +43,7 @@ from .proto.engineremotestart_pb2_grpc import EngineRemoteStartServiceStub
 from .proto.engineremotestart_pb2 import GetEngineRemoteStartReq, GetEngineRemoteStartResp, EngineRunningStatus
 from .proto.car_preferences_pb2_grpc import CarPreferencesStub
 from .proto.car_preferences_pb2 import GetPreferencesReq, GetPreferencesResp
-from .proto.car_preferences_pb2 import UpdatePreferencesReq, UpdatePreferencesResp, Preference
+from .proto.car_preferences_pb2 import UpdatePreferencesReq, Preference
 from .proto.battery_pb2_grpc import BatteryServiceStub
 from .proto.battery_pb2 import GetBatteryRequest, GetBatteryResponse
 
@@ -76,9 +79,52 @@ SOURCE_REFRESH_EVERY_CYCLES = {
     "preference": 240,  # vehicle nickname: ~2 h
     "odometer": 4,      # ~2 min; only moves while driving
 }
+# The cycle counts above assume the minimum 30s poll. With a longer interval
+# (dynamic polling at night runs every 30 minutes) counting cycles alone
+# would stretch "health every 20 cycles" to ten hours, so a source is also
+# due once this much wall time has passed since it last refreshed. The 1.5x
+# margin keeps the cycle count in charge at the nominal interval.
+SOURCE_REFRESH_NOMINAL_CYCLE_SECONDS = 30
+SOURCE_REFRESH_TIME_CEILING_FACTOR = 1.5
+
+# A failed source is retried independently from healthy sources. Start at the
+# minimum poll interval, then back off exponentially so a persistent endpoint
+# outage cannot turn every coordinator callback into a request/log storm.
+SOURCE_FAILURE_BACKOFF_BASE_SECONDS = 30
+SOURCE_FAILURE_BACKOFF_MAX_SECONDS = 5 * 60
+
+# How long a failed source may keep serving its last good snapshot. Lock and
+# door state is security relevant, so it goes "unknown" much sooner than the
+# slow-moving sources: an hour-old "locked" is worse than no answer.
+SOURCE_CACHE_MAX_AGE = timedelta(hours=1)
+SOURCE_CACHE_MAX_AGE_OVERRIDES = {
+    "exterior": timedelta(minutes=10),
+}
+
+# Honk/flash and parked climatization have no state to confirm afterwards, so
+# their only feedback is the invocation stream. The first message is normally
+# just SENT; keep reading this long for a terminal status (CAR_OFFLINE, a
+# timeout, a refusal) before settling for the acknowledgement.
+INVOCATION_FOLLOW_UP_SECONDS = 5
+
+CHARGE_PILE_EXCLUSIVE_FIELDS = (
+    "charge_trade_no",
+    "home_charge_status",
+    "has_home_charge_pile",
+    "plug_and_charge_enabled",
+    "last_charge_order",
+    "charge_pile_name",
+    "charge_pile_address",
+    "charging_voltage",
+    "charging_current",
+    "charging_session_energy",
+)
 
 
-async def _first_stream_response(call, default=None):
+_NO_STREAM_DEFAULT = object()
+
+
+async def _first_stream_response(call, default=_NO_STREAM_DEFAULT):
     """Await the first message of a server-streaming RPC, then cancel it.
 
     All of Volvo's RPCs are unary-stream; the app only ever consumes the
@@ -90,7 +136,16 @@ async def _first_stream_response(call, default=None):
             return res
     finally:
         call.cancel()
-    return default
+    if default is not _NO_STREAM_DEFAULT:
+        return default
+    raise VolvoAPIError("gRPC stream completed without a response")
+
+
+def _require_message_field(response, field: str, operation: str):
+    """Reject a protobuf response whose required message payload is absent."""
+    if not response.HasField(field):
+        raise VolvoAPIError(f"{operation} returned no {field} payload")
+    return response
 
 BATTERY_CHARGING_STATUS = {
     0: "unknown",
@@ -209,33 +264,121 @@ class VehicleAPI(VehicleBaseAPI):
         else:
             raise HomeAssistantError("未知错误")
 
+    def _validate_invocation_response(self, response, operation: str) -> None:
+        """Require a server acknowledgement before accepting a control."""
+        _require_message_field(response, "data", operation)
+        self.raise_invocation_fail(response.data.status)
+
+    def _note_grpc_error(self, err) -> None:
+        """Invalidate the session when gRPC says the token is not accepted."""
+        try:
+            unauthenticated = err.code() == grpc.StatusCode.UNAUTHENTICATED
+        except Exception:  # pragma: no cover - defensive
+            return
+        if unauthenticated and self.note_grpc_unauthenticated():
+            _LOGGER.warning(
+                "gRPC rejected the session token; re-authenticating on the "
+                "next poll"
+            )
+
+    async def _first_response(self, call, default=_NO_STREAM_DEFAULT):
+        """_first_stream_response plus gRPC authentication-failure handling."""
+        try:
+            return await _first_stream_response(call, default)
+        except grpc_aio.AioRpcError as err:
+            self._note_grpc_error(err)
+            raise
+
+    async def _run_invocation(
+        self, call, operation: str, *, follow_up_seconds: float = 0
+    ):
+        """Send a control and validate the server's verdict on it.
+
+        The first stream message must be an accepted status. With
+        follow_up_seconds, later messages are read for that long as well so a
+        terminal failure reported after the initial SENT is not mistaken for
+        success. Running out of time, or the stream ending, leaves the
+        acknowledgement standing.
+        """
+        try:
+            stream = call.__aiter__()
+            try:
+                response = await stream.__anext__()
+            except StopAsyncIteration:
+                raise VolvoAPIError(
+                    "gRPC stream completed without a response"
+                ) from None
+            except grpc_aio.AioRpcError as err:
+                self._note_grpc_error(err)
+                raise
+            _LOGGER.debug("%s: %s", operation, redact_sensitive(response))
+            self._validate_invocation_response(response, operation)
+            if (
+                follow_up_seconds <= 0
+                or response.data.status == invocationStatus.SUCCESS
+            ):
+                return response
+
+            try:
+                async with asyncio.timeout(follow_up_seconds):
+                    while True:
+                        try:
+                            follow_up = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        if not follow_up.HasField("data"):
+                            continue
+                        _LOGGER.debug(
+                            "%s follow-up: %s",
+                            operation,
+                            redact_sensitive(follow_up),
+                        )
+                        self.raise_invocation_fail(follow_up.data.status)
+                        response = follow_up
+                        if follow_up.data.status == invocationStatus.SUCCESS:
+                            break
+            except TimeoutError:
+                pass
+            except grpc_aio.AioRpcError as err:
+                # The command was already acknowledged; a stream that breaks
+                # afterwards (deadline, reset) does not undo that.
+                _LOGGER.debug(
+                    "%s stream ended after the acknowledgement: %s",
+                    operation,
+                    redact_sensitive(err),
+                )
+            return response
+        finally:
+            call.cancel()
+
     async def get_fuel_status(self, vin) -> GetFuelResp:
         stub = FuelServiceStub(await self.get_channel())
         req = GetFuelReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetFuel(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else GetFuelResp()
+        return _require_message_field(res, "data", "FuelService.GetFuel")
 
     async def get_exterior(self, vin) -> GetExteriorResp:
         stub = ExteriorServiceStub(await self.get_channel())
         req = GetExteriorReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetExterior(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else GetExteriorResp()
+        return _require_message_field(
+            res, "data", "ExteriorService.GetExterior"
+        )
 
     async def get_health(self, vin) -> GetHealthResp:
         stub = HealthServiceStub(await self.get_channel())
         req = GetHealthReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetHealth(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is None:
-            return GetHealthResp()
+        _require_message_field(res, "data", "HealthService.GetHealth")
         _LOGGER.debug("get_health resp: %s", redact_sensitive(res))
         return res
 
@@ -243,41 +386,44 @@ class VehicleAPI(VehicleBaseAPI):
         stub = OdometerServiceStub(await self.get_channel())
         req = GetOdometerReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetOdometer(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else GetOdometerResp()
+        return _require_message_field(
+            res, "data", "OdometerService.GetOdometer"
+        )
 
     async def get_availability(self, vin) -> GetAvailabilityResp:
         stub = AvailabilityServiceStub(await self.get_channel())
         req = GetAvailabilityReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetAvailability(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else GetAvailabilityResp()
+        return _require_message_field(
+            res, "data", "AvailabilityService.GetAvailability"
+        )
 
     async def window_control(self, vin, opentype):
         stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = windowControlReq(head=req_header, openType=opentype)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.WindowControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.WindowControl")
         return
 
     async def get_location(self, vin) -> StreamLastKnownLocationsResp:
         stub = DtlInternetServiceStub(await self.get_lbs_channel())
         req = StreamLastKnownLocationsReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.StreamLastKnownLocations(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else StreamLastKnownLocationsResp()
+        return res
 
     async def engine_control(self, vin, isStart: bool, duration: int):
         stub = InvocationServiceStub(await self.get_channel())
@@ -288,12 +434,11 @@ class VehicleAPI(VehicleBaseAPI):
         else:
             req = EngineStartReq(head=req_header, isStart=isStart)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.EngineStart(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.EngineStart")
         return
 
     async def climatization_control(self, vin: str, is_start: bool):
@@ -317,35 +462,37 @@ class VehicleAPI(VehicleBaseAPI):
                 req, metadata=metadata, timeout=TIMEOUT_SECONDS
             )
 
-        res = await _first_stream_response(responses)
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        await self._run_invocation(
+            responses,
+            (
+                "InvocationService.ClimatizationStart"
+                if is_start
+                else "InvocationService.ClimatizationStop"
+            ),
+            follow_up_seconds=INVOCATION_FOLLOW_UP_SECONDS,
+        )
 
     async def honk_flash_control(self, vin, honk_flash_type: HonkFlashType):
         stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = HonkFlashReq(head=req_header, honkFlashType=honk_flash_type)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
-            stub.HonkFlash(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
+        await self._run_invocation(
+            stub.HonkFlash(req, metadata=metadata, timeout=TIMEOUT_SECONDS),
+            "InvocationService.HonkFlash",
+            follow_up_seconds=INVOCATION_FOLLOW_UP_SECONDS,
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
-        return
 
     async def door_lock(self, vin):
         stub = InvocationServiceStub(await self.get_channel())
         req_header = invocationHead(vin=vin)
         req = LockReq(head=req_header, lockType=LockType.LOCK_REDUCED_GUARD)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.Lock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.Lock")
         return
 
     async def door_unlock(self, vin, unlockType):
@@ -355,23 +502,23 @@ class VehicleAPI(VehicleBaseAPI):
         if unlockType != UnlockType.UNLOCK_UNSPECIFIED:
             req = UnlockReq(head=req_header, unlockType=unlockType)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.Unlock(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.Unlock")
         return
 
     async def get_engine_status(self, vin):
         stub = EngineRemoteStartServiceStub(await self.get_channel())
         req = GetEngineRemoteStartReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetEngineRemoteStart(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is None:
-            return GetEngineRemoteStartResp()
+        _require_message_field(
+            res, "data", "EngineRemoteStartService.GetEngineRemoteStart"
+        )
         _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
@@ -380,12 +527,11 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = SunroofControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.SunroofControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.SunroofControl")
         return
 
     async def tailgate_contorl(self, vin: str, controlType: invocationControlType):
@@ -393,12 +539,11 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = TailgateControlReq(head=req_header, type=controlType)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.TailgateControl(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("%s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("%s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.TailgateControl")
         return
 
     async def update_status(self, vin: str):
@@ -406,23 +551,23 @@ class VehicleAPI(VehicleBaseAPI):
         req_header = invocationHead(vin=vin)
         req = UpdateStatusReq(head=req_header)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.UpdateStatus(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is not None:
-            _LOGGER.debug("update_status resp: %s", redact_sensitive(res))
-            self.raise_invocation_fail(res.data.status)
+        _LOGGER.debug("update_status resp: %s", redact_sensitive(res))
+        self._validate_invocation_response(res, "InvocationService.UpdateStatus")
         return
 
     async def get_car_preferences(self, vin: str):
         stub = CarPreferencesStub(await self.get_channel())
         req = GetPreferencesReq(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetPreferences(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is None:
-            return GetPreferencesResp()
+        _require_message_field(
+            res, "preference", "CarPreferences.GetPreferences"
+        )
         _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
@@ -431,21 +576,21 @@ class VehicleAPI(VehicleBaseAPI):
         stub = BatteryServiceStub(await self.get_channel())
         req = GetBatteryRequest(vin=vin)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.GetLatestBattery(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        return res if res is not None else GetBatteryResponse()
+        return _require_message_field(
+            res, "battery", "BatteryService.GetLatestBattery"
+        )
 
     async def update_car_preference(self, vin: str, nickname: str):
         stub = CarPreferencesStub(await self.get_channel())
         preference = Preference(nickName=nickname)
         req = UpdatePreferencesReq(vin=vin, preference=preference)
         metadata: list = [("vin", vin)]
-        res = await _first_stream_response(
+        res = await self._first_response(
             stub.UpdatePreferences(req, metadata=metadata, timeout=TIMEOUT_SECONDS)
         )
-        if res is None:
-            return UpdatePreferencesResp()
         _LOGGER.debug("%s", redact_sensitive(res))
         return res
 
@@ -467,28 +612,34 @@ class Vehicle(object):
 
         self.series_name = ""
         self.model_name = ""
-        self.car_locked = False
-        self.distance_to_empty = 0  # 续航公里
-        self.tail_gate_open = False
-        self.rear_right_door_open = False
-        self.rear_left_door_open = False
-        self.front_right_door_open = False
-        self.front_left_door_open = False
-        self.hood_open = False
-        self.sunroof_open = False
-        self.engine_running = False
-        self.engine_remote_running = False
-        self.odo_meter = 0
-        self.front_left_window_open = False
-        self.front_right_window_open = False
-        self.rear_left_window_open = False
-        self.rear_right_window_open = False
-        self.front_left_window_open_ajar = False
-        self.front_right_window_open_ajar = False
-        self.rear_left_window_open_ajar = False
-        self.rear_right_window_open_ajar = False
-        self.fuel_amount = 0
-        self.fuel_average_consumption_liters_per_100_km = 0
+        # Everything a data source owns starts as None ("unknown"), never
+        # as a plausible value. With False/0 defaults a first poll in which
+        # one source failed published "unlocked", "doors closed", 0 L of
+        # fuel and a 0 km odometer as if the car had reported them — which
+        # fires unlock/low-fuel automations after a restart and resets
+        # total_increasing statistics.
+        self.car_locked = None
+        self.distance_to_empty = None  # 续航公里
+        self.tail_gate_open = None
+        self.rear_right_door_open = None
+        self.rear_left_door_open = None
+        self.front_right_door_open = None
+        self.front_left_door_open = None
+        self.hood_open = None
+        self.sunroof_open = None
+        self.engine_running = None
+        self.engine_remote_running = None
+        self.odo_meter = None
+        self.front_left_window_open = None
+        self.front_right_window_open = None
+        self.rear_left_window_open = None
+        self.rear_right_window_open = None
+        self.front_left_window_open_ajar = None
+        self.front_right_window_open_ajar = None
+        self.rear_left_window_open_ajar = None
+        self.rear_right_window_open_ajar = None
+        self.fuel_amount = None
+        self.fuel_average_consumption_liters_per_100_km = None
         self.tm_distance = None
         self.tm_fuel_consumption = None
         self.tm_energy_consumption = None
@@ -513,11 +664,11 @@ class Vehicle(object):
         self.charge_data_source = None
         self.charge_pile_name = None
         self.charge_pile_address = None
-        self.tank_lid_open = False
-        self.availability_status = AvailabilityStatus.Available
-        self.unavailable_reason = AvailabilityReason.Unspecified1
-        self.engine_remote_start_time = 0
-        self.engine_remote_end_time = 0
+        self.tank_lid_open = None
+        self.availability_status = None
+        self.unavailable_reason = None
+        self.engine_remote_start_time = None
+        self.engine_remote_end_time = None
         # self.fuel_amount_level = 0
         # None, not (0, 0): a zeroed fix is a real coordinate in the Gulf of
         # Guinea, so defaulting to it parked every not-yet-located car there
@@ -533,20 +684,25 @@ class Vehicle(object):
         # Set by the coordinator when the car stops appearing in the account
         # listing; entities consult it to go unavailable.
         self.is_unbound = False
-        self.service_warning_msg = "1"
-        self.service_warning = False
-        self.brake_fluid_level_warning = False
-        self.engine_coolant_level_warning = False
-        self.oil_level_warning = False
-        self.washer_fluid_level_warning = False
-        self.front_left_tyre_pressure_warning = False
-        self.front_right_tyre_pressure_warning = False
-        self.rear_left_tyre_pressure_warning = False
-        self.rear_right_tyre_pressure_warning = False
+        self.service_warning_msg = None
+        self.service_warning = None
+        self.brake_fluid_level_warning = None
+        self.engine_coolant_level_warning = None
+        self.oil_level_warning = None
+        self.washer_fluid_level_warning = None
+        self.front_left_tyre_pressure_warning = None
+        self.front_right_tyre_pressure_warning = None
+        self.rear_left_tyre_pressure_warning = None
+        self.rear_right_tyre_pressure_warning = None
         self.nickname = ""
 
         # Caching infrastructure for resilience
         self._poll_cycle = 0  # drives SOURCE_REFRESH_EVERY_CYCLES throttling
+        # Monotonic time of each source's last successful refresh.
+        self._source_refreshed_monotonic: Dict[str, float] = {}
+        # Extra cache lifetime granted by the coordinator when it polls at a
+        # long (dynamic) interval; zero for fixed-interval polling.
+        self.cache_age_allowance = timedelta(0)
         self._cache: Dict[str, Any] = {}  # Stores last known good values
         self._cache_timestamp: Dict[str, dt] = {}  # Timestamps for each data source
         self._last_successful_update = dt.now(timezone.utc)
@@ -570,6 +726,10 @@ class Vehicle(object):
         self._data_source_generation: Dict[str, int] = {
             source: -1 for source in self._data_source_status
         }
+        self._source_consecutive_failures: Dict[str, int] = {
+            source: 0 for source in self._data_source_status
+        }
+        self._source_retry_after: Dict[str, float] = {}
 
 
     def _save_to_cache(self, source: str, data_dict: Dict[str, Any]):
@@ -578,29 +738,60 @@ class Vehicle(object):
         # or a freshly built dict that nothing else holds a reference to.
         self._cache[source] = dict(data_dict)
         self._cache_timestamp[source] = dt.now(timezone.utc)
+        self._source_refreshed_monotonic[source] = time.monotonic()
         self._last_successful_update = dt.now(timezone.utc)
         self._data_source_status[source] = True
-        self._data_source_generation[source] = self._poll_cycle + 1
+        self._data_source_generation[source] = max(
+            self._data_source_generation.get(source, -1) + 1,
+            self._poll_cycle + 1,
+        )
+        self._source_consecutive_failures[source] = 0
+        self._source_retry_after.pop(source, None)
         self._consecutive_failures = 0
         _LOGGER.debug("Cached %s data for %s", source, vehicle_log_ref(self.vin))
-    
-    def _restore_from_cache(self, source: str) -> bool:
+
+    def _clear_stale_source_values(
+        self, source: str, keys: set[str] | None = None
+    ) -> None:
+        """Drop an expired snapshot and clear only the values it owned."""
+        cached_data = self._cache.pop(source, {})
+        self._cache_timestamp.pop(source, None)
+        for key in cached_data:
+            if keys is not None and key not in keys:
+                continue
+            if hasattr(self, key):
+                setattr(self, key, None)
+
+    def _restore_from_cache(
+        self, source: str, *, keys: set[str] | None = None
+    ) -> bool:
         """Restore data from cache if available and not too old."""
         if source not in self._cache:
             return False
-        
-        # Check if cache is not too old (1 hour default)
+
+        # Check if cache is not too old (1 hour unless the source overrides)
         cache_age = dt.now(timezone.utc) - self._cache_timestamp.get(source, dt.min.replace(tzinfo=timezone.utc))
-        if cache_age > timedelta(hours=1):
-            _LOGGER.warning(f"Cache for {source} is too old ({cache_age}), not restoring")
+        max_age = (
+            SOURCE_CACHE_MAX_AGE_OVERRIDES.get(source, SOURCE_CACHE_MAX_AGE)
+            + self.cache_age_allowance
+        )
+        if cache_age > max_age:
+            _LOGGER.warning(
+                "Cache for %s is too old (%s), clearing stale values",
+                source,
+                cache_age,
+            )
+            self._clear_stale_source_values(source, keys)
             return False
-        
+
         # Restore cached values
         cached_data = self._cache[source]
         for key, value in cached_data.items():
+            if keys is not None and key not in keys:
+                continue
             if hasattr(self, key):
                 setattr(self, key, value)
-        
+
         _LOGGER.info(
             "Restored %s from cache (age: %s) for %s",
             source,
@@ -608,6 +799,31 @@ class Vehicle(object):
             vehicle_log_ref(self.vin),
         )
         return True
+
+    def _record_source_failure(self, source: str) -> None:
+        """Back off one failing source using a monotonic exponential timer."""
+        self._data_source_status[source] = False
+        failures = self._source_consecutive_failures.get(source, 0) + 1
+        self._source_consecutive_failures[source] = failures
+        delay = min(
+            SOURCE_FAILURE_BACKOFF_BASE_SECONDS
+            * (2 ** min(failures - 1, 16)),
+            SOURCE_FAILURE_BACKOFF_MAX_SECONDS,
+        )
+        self._source_retry_after[source] = time.monotonic() + delay
+        _LOGGER.debug(
+            "Backing off %s for %ss after source failure #%s on %s",
+            source,
+            delay,
+            failures,
+            vehicle_log_ref(self.vin),
+        )
+
+    def _record_source_success(self, source: str) -> None:
+        """Clear source-specific failure and backoff state."""
+        self._data_source_status[source] = True
+        self._source_consecutive_failures[source] = 0
+        self._source_retry_after.pop(source, None)
     
     def get_cache_info(self) -> Dict[str, Any]:
         """Get cache status for diagnostics."""
@@ -642,6 +858,9 @@ class Vehicle(object):
     async def _parse_exterior(self):
         try:
             exterior_resp: GetExteriorResp = await self._api.get_exterior(self.vin)
+            _require_message_field(
+                exterior_resp, "data", "ExteriorService.GetExterior"
+            )
             exterior_status: ExteriorStatus = exterior_resp.data
             
             # Build data dict before setting attributes
@@ -698,6 +917,9 @@ class Vehicle(object):
     async def _parse_health(self):
         try:
             health_resp: GetHealthResp = await self._api.get_health(self.vin)
+            _require_message_field(
+                health_resp, "data", "HealthService.GetHealth"
+            )
             health_status: HealthStatus = health_resp.data
 
             # Build data dict
@@ -738,6 +960,7 @@ class Vehicle(object):
     async def _parse_fuel(self):
         try:
             fuel_resp: GetFuelResp = await self._api.get_fuel_status(self.vin)
+            _require_message_field(fuel_resp, "data", "FuelService.GetFuel")
             fuel_data = fuel_resp.data
             
             # Build data dict
@@ -770,213 +993,275 @@ class Vehicle(object):
                 )
             return
 
-    async def _parse_battery(self):
-        """Collect vehicle battery and home-pile data without mixing sources."""
-        # Build a complete snapshot on every poll so ended or failed sessions
-        # cannot leave stale current, voltage, order or battery values behind.
-        data = {
-            "battery_charge_level_percentage": None,
-            "electric_range": None,
-            "tm_energy_consumption": None,
-            "battery_charging_status": None,
-            "charger_connection_status": None,
-            "estimated_charging_time": None,
-            "charging_power": None,
-            "charging_voltage": None,
-            "charging_current": None,
-            "charging_session_energy": None,
-            "charge_trade_no": None,
-            "home_charge_status": None,
-            "has_home_charge_pile": False,
-            "plug_and_charge_enabled": None,
-            "charge_data_source": None,
-            "charge_pile_name": None,
-            "charge_pile_address": None,
-        }
+    async def _parse_battery(
+        self, *, refresh_battery: bool = True, refresh_pile: bool = True
+    ):
+        """Collect battery and home-pile snapshots as independent sources."""
         battery_ok = False
         pile_ok = False
+        pile_has_data = False
+        battery_available = False
 
-        try:
-            battery_resp = await self._api.get_battery_status(self.vin)
-            if not battery_resp.HasField("battery"):
-                raise ValueError("BatteryService returned no battery data")
-
-            battery = battery_resp.battery
-            charging_power = battery.chargingPowerWatts / 1000
-            data.update({
-                "battery_charge_level_percentage": round(
-                    battery.batteryChargeLevelPercentage, 1
-                ),
-                "electric_range": battery.estimatedDistanceToEmptyKm,
-                "tm_energy_consumption": (
-                    battery.averageEnergyConsumptionKwhPer100Km
-                ),
-                "battery_charging_status": (
-                    "charging"
-                    if battery.chargingPowerWatts > 0
-                    else BATTERY_CHARGING_STATUS.get(
-                        battery.chargingStatus, "unknown"
+        if refresh_battery:
+            try:
+                battery_resp = await self._api.get_battery_status(self.vin)
+                _require_message_field(
+                    battery_resp, "battery", "BatteryService.GetBattery"
+                )
+                battery = battery_resp.battery
+                battery_level = _to_float(
+                    battery.batteryChargeLevelPercentage
+                )
+                charging_power_watts = _to_float(
+                    battery.chargingPowerWatts
+                )
+                if (
+                    battery_level is None
+                    or not 0 <= battery_level <= 100
+                    or charging_power_watts is None
+                ):
+                    raise VolvoAPIError(
+                        "BatteryService returned invalid numeric telemetry"
                     )
-                ),
-                "charger_connection_status": BATTERY_CONNECTION_STATUS.get(
-                    battery.chargerConnectionStatus, "unknown"
-                ),
-                "estimated_charging_time": (
-                    battery.estimatedChargingTimeToFullMinutes or None
-                ),
-                "charging_power": round(charging_power, 2),
-                "charge_data_source": "grpc_battery",
-                "charge_pile_name": None,
-                "charge_pile_address": None,
-            })
-            battery_ok = True
-        except Exception as grpc_error:
-            _LOGGER.debug(
-                "BatteryService unavailable for %s: %s",
-                vehicle_log_ref(self.vin),
-                redact_sensitive(grpc_error),
-            )
+                battery_data = {
+                    "battery_charge_level_percentage": round(
+                        battery_level, 1
+                    ),
+                    "electric_range": _to_float(
+                        battery.estimatedDistanceToEmptyKm
+                    ),
+                    "tm_energy_consumption": _to_float(
+                        battery.averageEnergyConsumptionKwhPer100Km
+                    ),
+                    "battery_charging_status": (
+                        "charging"
+                        if charging_power_watts > 0
+                        else BATTERY_CHARGING_STATUS.get(
+                            battery.chargingStatus, "unknown"
+                        )
+                    ),
+                    "charger_connection_status": (
+                        BATTERY_CONNECTION_STATUS.get(
+                            battery.chargerConnectionStatus, "unknown"
+                        )
+                    ),
+                    "estimated_charging_time": (
+                        battery.estimatedChargingTimeToFullMinutes or None
+                    ),
+                    "charging_power": round(
+                        charging_power_watts / 1000, 2
+                    ),
+                }
+                for key, value in battery_data.items():
+                    setattr(self, key, value)
+                self._save_to_cache("battery", battery_data)
+                battery_ok = True
+                battery_available = True
+            except Exception as grpc_error:
+                _LOGGER.debug(
+                    "BatteryService unavailable for %s: %s",
+                    vehicle_log_ref(self.vin),
+                    redact_sensitive(grpc_error),
+                )
+                self._data_source_status["battery"] = False
+                battery_available = self._restore_from_cache("battery")
+        else:
+            # A source in backoff keeps its bounded last-good snapshot but must
+            # not advance generation or be reported as a successful attempt.
+            battery_available = self._restore_from_cache("battery")
 
-        try:
-            payload = await self._api.get_charge_pile_status(
-                self.vin, self.series_code
-            )
-            if payload is None:
-                # A successful empty list means this account has no linked
-                # home pile; that is a valid configuration, not an API error.
+        if refresh_pile:
+            try:
+                # This is a complete pile-owned snapshot. A successful empty
+                # response/order list deliberately clears a previously linked
+                # pile, ended session, or old order.
+                pile_data = {
+                    "charge_trade_no": None,
+                    "home_charge_status": None,
+                    "has_home_charge_pile": False,
+                    "plug_and_charge_enabled": None,
+                    "last_charge_order": None,
+                    "charge_pile_name": None,
+                    "charge_pile_address": None,
+                    "charging_voltage": None,
+                    "charging_current": None,
+                    "charging_session_energy": None,
+                }
+                payload = await self._api.get_charge_pile_status(
+                    self.vin, self.series_code
+                )
+                if payload is not None:
+                    pile_has_data = True
+                    pile = payload["pile"]
+                    status = payload["status"]
+                    connector_status = _to_int(
+                        status.get("connectorStatus")
+                    )
+                    if connector_status is None:
+                        connector_status = _to_int(
+                            pile.get("connectorStatus")
+                        )
+                    charging_status = _to_int(
+                        status.get("startChargeSeqStat")
+                    )
+                    charging_power = _to_float(status.get("power"))
+                    trade_no = (
+                        pile.get("tradeNo") or status.get("startChargeSeq")
+                    )
+                    is_charging = (
+                        connector_status == 3
+                        or charging_status in (1, 2)
+                        or (
+                            charging_power is not None
+                            and charging_power > 0
+                        )
+                    )
+
+                    if charging_status is not None:
+                        home_charge_status = PILE_CHARGING_STATUS.get(
+                            charging_status, "unknown"
+                        )
+                    elif is_charging:
+                        home_charge_status = "charging"
+                    elif connector_status in (1, 2):
+                        home_charge_status = "idle"
+                    else:
+                        home_charge_status = "unknown"
+
+                    charging_state = (
+                        "charging" if is_charging else home_charge_status
+                    )
+                    active_trade_no = (
+                        trade_no
+                        if home_charge_status
+                        in {"starting", "charging", "stopping"}
+                        else None
+                    )
+                    plug_and_charge = _to_int(
+                        pile.get("plugAndChargeEnabled")
+                    )
+                    pile_data.update(
+                        {
+                            "charge_trade_no": active_trade_no,
+                            "home_charge_status": home_charge_status,
+                            "has_home_charge_pile": True,
+                            "plug_and_charge_enabled": (
+                                None
+                                if plug_and_charge is None
+                                else bool(plug_and_charge)
+                            ),
+                            "charge_pile_name": (
+                                pile.get("equipmentName")
+                                or pile.get("equipmentUserName")
+                            ),
+                            "charge_pile_address": pile.get("address"),
+                        }
+                    )
+
+                    # An idle home pile says nothing about a car charging at a
+                    # public charger, so a valid BatteryService snapshot wins.
+                    if trade_no or is_charging or not battery_available:
+                        session_energy = _to_float(
+                            status.get("totalPower")
+                        )
+                        if session_energy is None:
+                            session_energy = _to_float(
+                                pile.get("chargeUsePower")
+                            )
+                        pile_data.update(
+                            {
+                                "battery_charging_status": charging_state,
+                                "charger_connection_status": (
+                                    PILE_CONNECTION_STATUS.get(
+                                        connector_status, "unknown"
+                                    )
+                                ),
+                                "estimated_charging_time": _to_int(
+                                    status.get("estimatedChargingTime")
+                                ),
+                                "charging_power": charging_power,
+                                "charging_voltage": _to_float(
+                                    status.get("voltageA")
+                                ),
+                                "charging_current": _to_float(
+                                    status.get("currentA")
+                                ),
+                                "charging_session_energy": session_energy,
+                            }
+                        )
+
+                try:
+                    orders = await self._api.get_charge_order_list(
+                        vin=self.vin, series_code=self.series_code
+                    )
+                    if orders:
+                        latest = orders[0]
+                        pile_data["last_charge_order"] = {
+                            "order_no": latest.get("orderNo"),
+                            "start_time": latest.get("startTime"),
+                            "end_time": latest.get("endTime"),
+                            "duration": latest.get("chargeUseTime"),
+                            "energy_kwh": _to_float(
+                                latest.get("chargeUsePower")
+                            ),
+                            "stop_reason": latest.get("stopFailReason"),
+                        }
+                except Exception as order_error:
+                    # The pile status is still valid. Retain the previous order
+                    # only when the order endpoint itself failed.
+                    pile_data["last_charge_order"] = self.last_charge_order
+                    _LOGGER.debug(
+                        "Charge order history unavailable for %s: %s",
+                        vehicle_log_ref(self.vin),
+                        redact_sensitive(order_error),
+                    )
+
+                for key, value in pile_data.items():
+                    setattr(self, key, value)
+                self._save_to_cache("charge_pile", pile_data)
                 pile_ok = True
-            else:
-                pile = payload["pile"]
-                status = payload["status"]
-                # Only a running session has telemetry; otherwise the pile entry
-                # itself is the only source of connector state.
-                connector_status = _to_int(status.get("connectorStatus"))
-                if connector_status is None:
-                    connector_status = _to_int(pile.get("connectorStatus"))
-                charging_status = _to_int(status.get("startChargeSeqStat"))
-                charging_power = _to_float(status.get("power"))
-                trade_no = pile.get("tradeNo") or status.get("startChargeSeq")
-                is_charging = (
-                    connector_status == 3
-                    or charging_status in (1, 2)
-                    or (charging_power is not None and charging_power > 0)
+            except Exception as pile_error:
+                _LOGGER.debug(
+                    "Home charge-pile data unavailable for %s: %s",
+                    vehicle_log_ref(self.vin),
+                    redact_sensitive(pile_error),
                 )
-
-                if charging_status is not None:
-                    home_charge_status = PILE_CHARGING_STATUS.get(
-                        charging_status, "unknown"
-                    )
-                elif is_charging:
-                    home_charge_status = "charging"
-                elif connector_status in (1, 2):
-                    home_charge_status = "idle"
-                else:
-                    home_charge_status = "unknown"
-
-                charging_state = (
-                    "charging" if is_charging else home_charge_status
-                )
-                active_trade_no = (
-                    trade_no
-                    if home_charge_status
-                    in {"starting", "charging", "stopping"}
+                self._data_source_status["charge_pile"] = False
+                # Fresh BatteryService charging values must not be overwritten
+                # by an older active-session cache from the pile.
+                restore_keys = (
+                    set(CHARGE_PILE_EXCLUSIVE_FIELDS)
+                    if battery_available
                     else None
                 )
-
-                data.update({
-                    "charge_trade_no": active_trade_no,
-                    "home_charge_status": home_charge_status,
-                    "has_home_charge_pile": True,
-                    "plug_and_charge_enabled": bool(
-                        _to_int(pile.get("plugAndChargeEnabled"))
-                    ),
-                    "charge_data_source": (
-                        "grpc_battery+charge_pile_api"
-                        if battery_ok
-                        else "charge_pile_api"
-                    ),
-                    "charge_pile_name": (
-                        pile.get("equipmentName")
-                        or pile.get("equipmentUserName")
-                    ),
-                    "charge_pile_address": pile.get("address"),
-                })
-
-                # An idle home pile says nothing about a car charging elsewhere,
-                # so it must not overwrite BatteryService telemetry.
-                if trade_no or is_charging or not battery_ok:
-                    session_energy = _to_float(status.get("totalPower"))
-                    if session_energy is None:
-                        session_energy = _to_float(
-                            pile.get("chargeUsePower")
-                        )
-                    data.update({
-                        "battery_charging_status": charging_state,
-                        "charger_connection_status": (
-                            PILE_CONNECTION_STATUS.get(
-                                connector_status, "unknown"
-                            )
-                        ),
-                        "estimated_charging_time": _to_int(
-                            status.get("estimatedChargingTime")
-                        ),
-                        "charging_power": charging_power,
-                        "charging_voltage": _to_float(
-                            status.get("voltageA")
-                        ),
-                        "charging_current": _to_float(
-                            status.get("currentA")
-                        ),
-                        "charging_session_energy": session_energy,
-                    })
-                pile_ok = True
-
-            try:
-                orders = await self._api.get_charge_order_list(
-                    vin=self.vin, series_code=self.series_code
+                self._restore_from_cache(
+                    "charge_pile", keys=restore_keys
                 )
-                if orders:
-                    latest = orders[0]
-                    data["last_charge_order"] = {
-                        "order_no": latest.get("orderNo"),
-                        "start_time": latest.get("startTime"),
-                        "end_time": latest.get("endTime"),
-                        "duration": latest.get("chargeUseTime"),
-                        "energy_kwh": _to_float(latest.get("chargeUsePower")),
-                        "stop_reason": latest.get("stopFailReason"),
-                    }
-            except Exception as order_error:
-                _LOGGER.debug(
-                    "Charge order history unavailable for %s: %s",
-                    vehicle_log_ref(self.vin),
-                    redact_sensitive(order_error),
-                )
-        except Exception as pile_error:
-            _LOGGER.debug(
-                "Home charge-pile data unavailable for %s: %s",
-                vehicle_log_ref(self.vin),
-                redact_sensitive(pile_error),
+        else:
+            # Maintain/expire pile-owned metadata while this source is backed
+            # off. BatteryService remains authoritative for shared fields.
+            restore_keys = (
+                set(CHARGE_PILE_EXCLUSIVE_FIELDS)
+                if battery_available
+                else None
             )
+            self._restore_from_cache("charge_pile", keys=restore_keys)
 
-        if not battery_ok and not pile_ok:
-            self._data_source_status["battery"] = False
-            self._data_source_status["charge_pile"] = False
-            self._restore_from_cache("battery")
-            return
-
-        for key, value in data.items():
-            setattr(self, key, value)
-        self._save_to_cache("battery", data)
-        self._data_source_status["battery"] = battery_ok
-        self._data_source_status["charge_pile"] = pile_ok
-        if pile_ok:
-            self._data_source_generation["charge_pile"] = (
-                self._poll_cycle + 1
-            )
+        if battery_available and pile_ok and pile_has_data:
+            self.charge_data_source = "grpc_battery+charge_pile_api"
+        elif battery_available:
+            self.charge_data_source = "grpc_battery"
+        elif pile_ok and pile_has_data:
+            self.charge_data_source = "charge_pile_api"
+        elif battery_ok or pile_ok:
+            self.charge_data_source = None
 
     async def _parse_odometer(self):
         try:
             odometer_resp: GetOdometerResp = await self._api.get_odometer(self.vin)
+            _require_message_field(
+                odometer_resp, "data", "OdometerService.GetOdometer"
+            )
             odometer_data = odometer_resp.data
             
             # Build data dict
@@ -1014,6 +1299,11 @@ class Vehicle(object):
     async def _parse_availability(self):
         try:
             availability_resp: GetAvailabilityResp = await self._api.get_availability(self.vin)
+            _require_message_field(
+                availability_resp,
+                "data",
+                "AvailabilityService.GetAvailability",
+            )
             availability_data = availability_resp.data
             
             # Build data dict
@@ -1101,6 +1391,11 @@ class Vehicle(object):
                 return
             
             engine_status_resp: GetEngineRemoteStartResp = await self._api.get_engine_status(self.vin)
+            _require_message_field(
+                engine_status_resp,
+                "data",
+                "EngineRemoteStartService.GetEngineRemoteStart",
+            )
             engine_status = engine_status_resp.data
             
             # Build data dict
@@ -1137,6 +1432,11 @@ class Vehicle(object):
     async def _parse_car_preference(self):
         try:
             preference_resp: GetPreferencesResp = await self._api.get_car_preferences(self.vin)
+            _require_message_field(
+                preference_resp,
+                "preference",
+                "CarPreferences.GetPreferences",
+            )
             
             # Build data dict
             data = {
@@ -1177,6 +1477,12 @@ class Vehicle(object):
 
     def _should_refresh(self, source):
         """Return True when this source is due on the current poll cycle."""
+        retry_after = self._source_retry_after.get(source)
+        if retry_after is not None:
+            if time.monotonic() < retry_after:
+                return False
+            self._source_retry_after.pop(source, None)
+
         every = SOURCE_REFRESH_EVERY_CYCLES.get(source)
         if every is None:
             return True
@@ -1188,10 +1494,17 @@ class Vehicle(object):
         # Always run on the first cycle so entities are populated at setup.
         if source not in self._cache:
             return True
-        return self._poll_cycle % every == 0
+        if self._poll_cycle % every == 0:
+            return True
+        refreshed = self._source_refreshed_monotonic.get(source)
+        return refreshed is not None and (
+            time.monotonic() - refreshed
+            >= every
+            * SOURCE_REFRESH_NOMINAL_CYCLE_SECONDS
+            * SOURCE_REFRESH_TIME_CEILING_FACTOR
+        )
 
     async def update(self):
-        tasks = []
         await self._api.get_channel()
         # Sources that can change at any moment run every cycle; slow-moving
         # ones are throttled by SOURCE_REFRESH_EVERY_CYCLES.
@@ -1201,21 +1514,79 @@ class Vehicle(object):
             ("fuel", self._parse_fuel),
             ("availability", self._parse_availability),
             ("location", self._parse_location),
-            ("engine_status", self._parse_engine_status),
             ("health", self._parse_health),
             ("preference", self._parse_car_preference),
         ]
+        if self.isAaos:
+            candidates.append(("engine_status", self._parse_engine_status))
+
+        attempted_sources = []
+        generation_before = {}
+        scheduled_calls = []
+        for source, runf in candidates:
+            if not self._should_refresh(source):
+                continue
+            attempted_sources.append(source)
+            generation_before[source] = self._data_source_generation[source]
+            scheduled_calls.append(runf)
+
         if self.supports_electric:
-            candidates.append(("battery", self._parse_battery))
+            refresh_battery = self._should_refresh("battery")
+            refresh_pile = self._should_refresh("charge_pile")
+            if refresh_battery or refresh_pile:
+                for source, refresh in (
+                    ("battery", refresh_battery),
+                    ("charge_pile", refresh_pile),
+                ):
+                    if refresh:
+                        attempted_sources.append(source)
+                        generation_before[source] = (
+                            self._data_source_generation[source]
+                        )
+
+                async def refresh_electric_sources():
+                    await self._parse_battery(
+                        refresh_battery=refresh_battery,
+                        refresh_pile=refresh_pile,
+                    )
+
+                scheduled_calls.append(refresh_electric_sources)
 
         async with asyncio.TaskGroup() as tg:
-            for source, runf in candidates:
-                if not self._should_refresh(source):
-                    continue
-                tasks.append(tg.create_task(runf()))
-        for task in tasks:
-            task.result()
+            for runf in scheduled_calls:
+                tg.create_task(runf())
+
+        successful_sources = []
+        for source in attempted_sources:
+            if (
+                self._data_source_generation[source]
+                > generation_before[source]
+            ):
+                successful_sources.append(source)
+                self._record_source_success(source)
+            else:
+                self._record_source_failure(source)
+
         self._poll_cycle += 1
+        if attempted_sources and not successful_sources:
+            raise VolvoAPIError(
+                "No attempted vehicle data source refreshed successfully"
+            )
+
+        applicable_sources = set(self._data_source_status)
+        if not self.isAaos:
+            applicable_sources.discard("engine_status")
+        if (
+            not attempted_sources
+            and applicable_sources
+            and all(
+                self._data_source_status[source] is False
+                for source in applicable_sources
+            )
+        ):
+            raise VolvoAPIError(
+                "All vehicle data sources are waiting for failure backoff"
+            )
 
     async def lock_window(self):
         await self._api.window_control(self.vin, invocationControlType.CLOSE)
@@ -1271,7 +1642,9 @@ class Vehicle(object):
             force_refresh=True,
         )
         if not trade_no:
-            raise Exception("No active home-charge session to stop")
+            raise HomeAssistantError(
+                "No active home-charge session to stop"
+            )
         result = await self._api.stop_charge_pile(
             trade_no, self.vin, self.series_code
         )
@@ -1310,9 +1683,10 @@ def _to_float(value):
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _to_int(value):

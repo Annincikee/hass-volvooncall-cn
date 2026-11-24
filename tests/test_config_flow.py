@@ -206,7 +206,7 @@ class TestOptionsFlow:
 
     @pytest.mark.asyncio
     async def test_options_flow_init(self, hass: HomeAssistant):
-        """Test options flow initialization."""
+        """Options must not send the stored account or password to the UI."""
         # Create a config entry first
         config_entry = MockConfigEntry(
             domain=DOMAIN,
@@ -224,6 +224,12 @@ class TestOptionsFlow:
         
         assert result["type"] == data_entry_flow.FlowResultType.FORM
         assert result["step_id"] == "user"
+        fields = {
+            marker.schema: marker
+            for marker in result["data_schema"].schema
+        }
+        assert CONF_USERNAME not in fields
+        assert fields[CONF_PASSWORD].default() == ""
 
     @pytest.mark.asyncio
     async def test_options_flow_update_scan_interval(self, hass: HomeAssistant):
@@ -239,7 +245,10 @@ class TestOptionsFlow:
         )
         config_entry.add_to_hass(hass)
         
-        with patch("custom_components.volvooncall_cn.config_flow.volvo_validation", return_value={}):
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={}),
+        ) as mock_validation:
             result = await hass.config_entries.options.async_init(config_entry.entry_id)
             
             # Update scan interval
@@ -247,8 +256,7 @@ class TestOptionsFlow:
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"],
                 user_input={
-                    CONF_USERNAME: TEST_USERNAME,
-                    CONF_PASSWORD: TEST_PASSWORD,
+                    CONF_PASSWORD: "",
                     CONF_SCAN_INTERVAL: new_scan_interval,
                     CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL,
                 }
@@ -257,6 +265,13 @@ class TestOptionsFlow:
             assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
             assert result["data"][CONF_SCAN_INTERVAL] == new_scan_interval
             assert result["data"][CONF_POWERTRAIN_TYPE] == POWERTRAIN_FUEL
+            assert CONF_USERNAME not in result["data"]
+            assert CONF_PASSWORD not in result["data"]
+            assert config_entry.data[CONF_USERNAME] == TEST_USERNAME
+            assert config_entry.data[CONF_PASSWORD] == TEST_PASSWORD
+            assert CONF_USERNAME not in config_entry.options
+            assert CONF_PASSWORD not in config_entry.options
+            mock_validation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_options_flow_validation_error(self, hass: HomeAssistant):
@@ -272,23 +287,34 @@ class TestOptionsFlow:
         )
         config_entry.add_to_hass(hass)
         
-        with patch("custom_components.volvooncall_cn.config_flow.volvo_validation", 
-                   return_value={"base": "网络错误"}):
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={"base": "网络错误"}),
+        ) as mock_validation:
             result = await hass.config_entries.options.async_init(config_entry.entry_id)
             
             # Try to update with invalid credentials
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"],
                 user_input={
-                    CONF_USERNAME: TEST_USERNAME,
                     CONF_PASSWORD: "wrong_password",
                     CONF_SCAN_INTERVAL: 60,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_HYBRID,
                 }
             )
             
             assert result["type"] == data_entry_flow.FlowResultType.FORM
             assert "base" in result["errors"]
             assert result["errors"]["base"] == "网络错误"
+            fields = {
+                marker.schema: marker
+                for marker in result["data_schema"].schema
+            }
+            assert fields[CONF_PASSWORD].default() == ""
+            assert config_entry.data[CONF_PASSWORD] == TEST_PASSWORD
+            mock_validation.assert_awaited_once_with(
+                hass, TEST_USERNAME, "wrong_password"
+            )
 
     @pytest.mark.asyncio
     async def test_options_flow_preserves_existing_values(self, hass: HomeAssistant):
@@ -309,8 +335,154 @@ class TestOptionsFlow:
         # Check that form shows existing values
         assert result["type"] == data_entry_flow.FlowResultType.FORM
         assert result["step_id"] == "user"
-        # The schema should have defaults set to current values
-        # (This is implementation detail, mainly checking no crash occurs)
+        fields = {
+            marker.schema: marker
+            for marker in result["data_schema"].schema
+        }
+        assert CONF_USERNAME not in fields
+        assert fields[CONF_PASSWORD].default() == ""
+        assert fields[CONF_SCAN_INTERVAL].default() == 90
+        assert fields[CONF_POWERTRAIN_TYPE].default() == POWERTRAIN_HYBRID
+
+    @pytest.mark.asyncio
+    async def test_options_flow_new_password_is_validated_and_canonicalized(
+        self, hass: HomeAssistant
+    ):
+        """A changed password moves legacy option credentials into data."""
+        runtime_username = "legacy-options-account"
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: "stale-data-account",
+                CONF_PASSWORD: "stale-data-password",
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            },
+            options={
+                CONF_USERNAME: runtime_username,
+                CONF_PASSWORD: "runtime-old-password",
+                CONF_SCAN_INTERVAL: 90,
+            },
+            unique_id=TEST_USERNAME,
+        )
+        config_entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={}),
+        ) as mock_validation:
+            result = await hass.config_entries.options.async_init(
+                config_entry.entry_id
+            )
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_PASSWORD: "runtime-new-password",
+                    CONF_SCAN_INTERVAL: 120,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_FUEL,
+                },
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+        mock_validation.assert_awaited_once_with(
+            hass, runtime_username, "runtime-new-password"
+        )
+        assert config_entry.data[CONF_USERNAME] == runtime_username
+        assert config_entry.data[CONF_PASSWORD] == "runtime-new-password"
+        assert CONF_USERNAME not in config_entry.options
+        assert CONF_PASSWORD not in config_entry.options
+        assert config_entry.options[CONF_SCAN_INTERVAL] == 120
+        assert config_entry.options[CONF_POWERTRAIN_TYPE] == POWERTRAIN_FUEL
+
+    @pytest.mark.asyncio
+    async def test_options_flow_blank_password_migrates_without_login(
+        self, hass: HomeAssistant
+    ):
+        """A settings-only save retains and canonicalizes legacy credentials."""
+        runtime_username = "legacy-options-account"
+        runtime_password = "runtime-password"
+        config_entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: "stale-data-account",
+                CONF_PASSWORD: "stale-data-password",
+            },
+            options={
+                CONF_USERNAME: runtime_username,
+                CONF_PASSWORD: runtime_password,
+                CONF_SCAN_INTERVAL: 90,
+            },
+            unique_id=TEST_USERNAME,
+        )
+        config_entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={}),
+        ) as mock_validation:
+            result = await hass.config_entries.options.async_init(
+                config_entry.entry_id
+            )
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_PASSWORD: "",
+                    CONF_SCAN_INTERVAL: 120,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_HYBRID,
+                },
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+        mock_validation.assert_not_awaited()
+        assert config_entry.data[CONF_USERNAME] == runtime_username
+        assert config_entry.data[CONF_PASSWORD] == runtime_password
+        assert CONF_USERNAME not in config_entry.options
+        assert CONF_PASSWORD not in config_entry.options
+
+    @pytest.mark.asyncio
+    async def test_legacy_options_cannot_duplicate_another_account(
+        self, hass: HomeAssistant
+    ):
+        """Legacy username overrides are rejected before any login request."""
+        existing = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: "account-a",
+                CONF_PASSWORD: "password-a",
+            },
+            unique_id="account-a",
+        )
+        duplicate = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_USERNAME: "account-b",
+                CONF_PASSWORD: "password-b",
+            },
+            options={CONF_USERNAME: "account-a"},
+            unique_id="account-b",
+        )
+        existing.add_to_hass(hass)
+        duplicate.add_to_hass(hass)
+
+        with patch(
+            "custom_components.volvooncall_cn.config_flow.volvo_validation",
+            new=AsyncMock(return_value={}),
+        ) as validation:
+            result = await hass.config_entries.options.async_init(
+                duplicate.entry_id
+            )
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_PASSWORD: "",
+                    CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+                    CONF_POWERTRAIN_TYPE: POWERTRAIN_HYBRID,
+                },
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["errors"]["base"] == "account_already_configured"
+        validation.assert_not_awaited()
+        assert duplicate.data[CONF_USERNAME] == "account-b"
 
 
 # =============================================================================
@@ -393,6 +565,8 @@ class TestEdgeCases:
         assert result["type"] == data_entry_flow.FlowResultType.ABORT
         assert result["reason"] == "reauth_successful"
         assert config_entry.data[CONF_PASSWORD] == "new_password"
+        assert CONF_USERNAME not in config_entry.options
+        assert CONF_PASSWORD not in config_entry.options
         mock_reload.assert_called_once_with(config_entry.entry_id)
 
     @pytest.mark.asyncio
@@ -471,10 +645,10 @@ class TestEdgeCases:
         mock_validation.assert_awaited_once_with(
             hass, runtime_username, "runtime-new-password"
         )
-        assert (
-            config_entry.options[CONF_PASSWORD]
-            == "runtime-new-password"
-        )
+        assert config_entry.data[CONF_USERNAME] == runtime_username
+        assert config_entry.data[CONF_PASSWORD] == "runtime-new-password"
+        assert CONF_USERNAME not in config_entry.options
+        assert CONF_PASSWORD not in config_entry.options
 
     @pytest.mark.asyncio
     async def test_reauth_flow_rejects_bad_password(self, hass: HomeAssistant):

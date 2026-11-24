@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import asyncio
+import math
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
-from homeassistant.util import slugify
+from homeassistant.util import dt as dt_util, slugify
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.update_coordinator import (
@@ -28,12 +29,17 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 
+from .polling import POLLING_MODE_FIXED, PollingSchedule
 from .store import CHARGE_LIMIT_DISABLED, VolvoStore
 from .volvooncall_base import (
     DEFAULT_SCAN_INTERVAL,
+    MIN_SCAN_INTERVAL,
     VolvoAuthError,
     VolvoAuthExpiredError,
+    VolvoAuthForbiddenError,
     VolvoAuthThrottledError,
+    VolvoRateLimitError,
+    VehicleBaseAPI,
     redact_sensitive,
     vehicle_log_ref,
 )
@@ -46,6 +52,7 @@ from .const import (
     ELECTRIC_CONTROL_KEYS,
     ELECTRIC_SENSOR_KEYS,
     POWERTRAIN_HYBRID,
+    VALIDATED_TOKENS_DATA,
 )
 
 PLATFORMS = {
@@ -67,20 +74,48 @@ FAILURE_GRACE_CYCLES = 5
 # reauthentication flow. More than one, because the server occasionally
 # rejects a valid account transiently under risk control.
 LOGIN_REJECTION_REAUTH_THRESHOLD = 3
+# The same for 403s from the password endpoint. Risk control answers 403 while
+# it throttles an account, so these need a longer streak (spread over about
+# half an hour by the auth backoff below) before the user is asked to step in.
+LOGIN_FORBIDDEN_REAUTH_THRESHOLD = 6
+# Backoff applied to the whole poll cycle after an authentication-class
+# failure (session rejected even after an in-cycle refresh, or a refused
+# login). Without it a persistent 403 cost two refresh calls and two vehicle
+# listings every scan interval, indefinitely — more traffic at exactly the
+# moment the server is asking for less.
+AUTH_BACKOFF_BASE_SECONDS = 60
+AUTH_BACKOFF_MAX_SECONDS = 30 * 60
+# Upper bound for a server-supplied Retry-After. An absurd value (or a date
+# far in the future) would otherwise silence polling for as long as it says.
+MAX_SERVER_RETRY_AFTER = 60 * 60
+# While a backoff window suppresses polling no failures are counted, so cached
+# data needs a time limit as well as FAILURE_GRACE_CYCLES.
+MIN_CACHED_DATA_GRACE_SECONDS = 5 * 60
 # Hard ceiling for one update cycle. It has to exceed the worst case the
 # transport layer can legitimately produce, or a degraded network makes every
 # cycle die here before any data lands. See REQUEST_BUDGET in
 # volvooncall_base: one REST call can spend up to
 # TIMEOUT * MAX_RETRIES + backoff, the auth pass and the vehicle listing are
 # sequential, and _parse_battery adds two more REST calls on top.
-UPDATE_CYCLE_TIMEOUT = 150
+UPDATE_CYCLE_TIMEOUT = 240
+# Updating vehicles concurrently prevents one slow car from starving every
+# vehicle after it, while a small bound avoids turning a multi-car account
+# into an API burst.
+MAX_CONCURRENT_VEHICLE_UPDATES = 2
+# Once the account listing is known, the cycle deadline scales by bounded
+# concurrency batches. This covers a slow battery + pile + order + auto-stop
+# chain without giving a hung call an unbounded lifetime.
+VEHICLE_BATCH_TIMEOUT = 180
 # Upper bound on queued forced refreshes, so a burst of control commands
 # cannot pile up an unbounded backlog of real polls.
 MAX_PENDING_FORCE_REFRESHES = 8
 # A control command must never wait for the coordinator's full 150-second
 # update budget multiple times. The command has already been accepted at this
 # point; this shorter deadline only bounds the follow-up state confirmation.
-CONTROL_CONFIRMATION_TIMEOUT = 30
+CONTROL_CONFIRMATION_TIMEOUT = 45
+# The delay before each attempt doubles (retry_delay, 2x, 4x): a car needs
+# several seconds to act and report back, and three polls fired a second
+# apart were all over before the new state could possibly be visible.
 CONTROL_CONFIRMATION_ATTEMPTS = 3
 # Consecutive failed charge-limit stop attempts before backing off. Without
 # this the coordinator re-sends the stop every poll forever, one warning and
@@ -91,8 +126,24 @@ CHARGE_LIMIT_STOP_BACKOFF_SECONDS = 30 * 60
 # entities go unavailable. The object itself is kept so positional entity
 # lookups stay correct; only availability flips.
 VEHICLE_ABSENCE_GRACE_CYCLES = 3
+# --- Dynamic polling -------------------------------------------------------
+# Keep the in-use interval for a while after the engine was last seen
+# running, so parking, locking and plugging in show up promptly instead of
+# one long idle interval later.
+IN_USE_LINGER_SECONDS = 5 * 60
+# A failed poll must not wait out a 30-minute night interval before trying
+# again. Backoff windows (auth, Retry-After, per-source) still gate what a
+# retry is actually allowed to request.
+POLL_RETRY_INTERVAL_SECONDS = 120
+# A partly failing cycle (some data source down, coordinator otherwise fine)
+# gets this many quick retries. Bounded, because a permanently failing source
+# would otherwise pin the whole schedule to the retry interval.
+DEGRADED_FAST_RETRY_CYCLES = 3
+# Home-charge states that mean a session is running or changing.
+ACTIVE_HOME_CHARGE_STATES = frozenset({"starting", "charging", "stopping"})
 AUTH_STORE_VERSION = 1
 TOKEN_SAVE_DELAY_SECONDS = 5
+AUTH_STORES_DATA = f"{DOMAIN}_auth_stores"
 
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 FRONTEND_URL_PATH = f"/{DOMAIN}/frontend"
@@ -114,8 +165,8 @@ async def async_confirm_vehicle_state(
     )
     try:
         async with asyncio.timeout(CONTROL_CONFIRMATION_TIMEOUT):
-            for _ in range(CONTROL_CONFIRMATION_ATTEMPTS):
-                await asyncio.sleep(retry_delay)
+            for attempt in range(CONTROL_CONFIRMATION_ATTEMPTS):
+                await asyncio.sleep(retry_delay * (2**attempt))
                 refresh_succeeded = await coordinator.async_force_refresh()
                 if not refresh_succeeded:
                     continue
@@ -269,10 +320,22 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         )
         return True
 
-    await hass.http.async_register_static_paths(
-        [StaticPathConfig(FRONTEND_URL_PATH, str(FRONTEND_PATH), True)]
-    )
-    await _async_register_card_resource(hass, card_resources)
+    # The cards are a convenience. They lean on Lovelace internals that change
+    # between Home Assistant releases, and a failure here must not take the
+    # vehicle integration down with it.
+    try:
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(FRONTEND_URL_PATH, str(FRONTEND_PATH), True)]
+        )
+        await _async_register_card_resource(hass, card_resources)
+    except Exception as err:
+        _LOGGER.warning(
+            "Could not register the bundled Lovelace cards (%s: %s); add %s "
+            "as module resources manually",
+            type(err).__name__,
+            err,
+            ", ".join(url for _, url in card_resources),
+        )
     return True
 
 
@@ -302,21 +365,29 @@ def _auth_store_for(hass: HomeAssistant, username: str) -> Store:
 
 async def _async_attach_token_store(
     hass: HomeAssistant, volvo_api: VehicleAPI, username: str
-) -> None:
+) -> Store:
     """Persist session tokens so restarts refresh instead of re-logging in.
 
     Frequent password logins (e.g. across quick Home Assistant restarts) have
     been observed to trip Volvo's server-side risk control.
     """
     auth_store = _auth_store_for(hass, username)
-    saved_tokens = await auth_store.async_load()
+    validated_tokens = hass.data.get(VALIDATED_TOKENS_DATA, {}).pop(
+        username, None
+    )
+    if not hass.data.get(VALIDATED_TOKENS_DATA):
+        hass.data.pop(VALIDATED_TOKENS_DATA, None)
+    saved_tokens = validated_tokens or await auth_store.async_load()
     if saved_tokens:
         volvo_api.import_tokens(saved_tokens)
+    if validated_tokens:
+        await auth_store.async_save(validated_tokens)
     volvo_api.set_token_listener(
         lambda tokens: auth_store.async_delay_save(
             lambda: tokens, TOKEN_SAVE_DELAY_SECONDS
         )
     )
+    return auth_store
 
 
 async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
@@ -335,27 +406,40 @@ async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
     if coordinator is None:
         return
 
+    current_api = coordinator.volvo_api
+    credentials_changed = not (
+        getattr(current_api, "_username", None) == username
+        and getattr(current_api, "_password", None) == password
+    )
+    if credentials_changed:
+        # Cancel pending writes from the old runtime before any reload path.
+        # This must also run when powertrain and password are saved together,
+        # otherwise an old delayed token write can win after new validation.
+        current_api.set_token_listener(None)
+        stores = hass.data.get(AUTH_STORES_DATA, {}).pop(entry_id, [])
+        for auth_store in stores:
+            await auth_store.async_remove()
+
     if coordinator.powertrain_type != powertrain_type:
         if powertrain_type != POWERTRAIN_HYBRID:
             remove_electric_entity_registry_entries(hass, entry_id)
         hass.config_entries.async_schedule_reload(entry_id)
         return
 
-    coordinator.update_interval = timedelta(seconds=interval)
-
-    # Cached Vehicle objects also hold the API instance. Hot-swapping only
-    # coordinator.volvo_api can therefore send a command through the old
-    # account while the next poll is still pending. Reload the whole entry so
-    # the coordinator and every Vehicle move credentials atomically.
-    current_api = coordinator.volvo_api
-    if (
-        getattr(current_api, "_username", None) == username
-        and getattr(current_api, "_password", None) == password
-    ):
+    if credentials_changed:
+        # Cached Vehicle objects hold the API instance too, so reload the
+        # coordinator and every vehicle atomically after credential changes.
+        hass.config_entries.async_schedule_reload(entry_id)
         return
 
-    hass.config_entries.async_schedule_reload(entry_id)
-
+    coordinator.set_polling_config(
+        interval, PollingSchedule.from_config(config_data)
+    )
+    # The update_interval setter only changes the numeric value; it does not
+    # move an already scheduled callback. Re-arm it so long -> short changes
+    # take effect immediately instead of waiting for the old interval.
+    if getattr(coordinator, "_listeners", None):
+        coordinator._schedule_refresh()
 
 async def async_setup_entry(hass, entry):
     """Set up the integration from a config entry."""
@@ -371,13 +455,20 @@ async def async_setup_entry(hass, entry):
     volvo_api = VehicleAPI(session=session, username=username, password=password)
     coordinator = None
     try:
-        await _async_attach_token_store(hass, volvo_api, username)
+        auth_store = await _async_attach_token_store(hass, volvo_api, username)
+        # Replace, not append: every reload and every ConfigEntryNotReady
+        # retry builds a new Store for the same file, and appending kept all
+        # of them alive for the lifetime of the process.
+        hass.data.setdefault(AUTH_STORES_DATA, {})[entry.entry_id] = [
+            auth_store
+        ]
         coordinator = VolvoCoordinator(
             hass,
             volvo_api,
             interval,
             powertrain_type,
             config_entry=entry,
+            polling_schedule=PollingSchedule.from_config(config_data),
         )
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -398,6 +489,7 @@ async def async_setup_entry(hass, entry):
         ):
             domain_data.pop(entry.entry_id, None)
         if hasattr(volvo_api, "close"):
+            volvo_api.set_token_listener(None)
             try:
                 await volvo_api.close()
             except Exception as close_err:  # pragma: no cover - defensive
@@ -425,8 +517,56 @@ async def async_unload_entry(hass, entry):
     if unload_ok:
         coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
         if coordinator is not None and hasattr(coordinator.volvo_api, "close"):
-            await coordinator.volvo_api.close()
+            volvo_api = coordinator.volvo_api
+            volvo_api.set_token_listener(None)
+            await _async_flush_tokens(hass, entry.entry_id, volvo_api)
+            await volvo_api.close()
     return unload_ok
+
+
+async def _async_flush_tokens(hass, entry_id, volvo_api) -> None:
+    """Write the live session to disk before the runtime goes away.
+
+    Token writes are debounced by TOKEN_SAVE_DELAY_SECONDS. A reload inside
+    that window made the next setup read the previous refresh token from
+    disk, which the server may already have rotated out.
+    """
+    stores = hass.data.get(AUTH_STORES_DATA, {}).get(entry_id) or []
+    if not stores or not isinstance(volvo_api, VehicleBaseAPI):
+        # No store: credentials changed and the stores were removed on
+        # purpose.
+        return
+    try:
+        await stores[-1].async_save(volvo_api.export_tokens())
+    except Exception as err:
+        _LOGGER.warning(
+            "Could not persist session tokens on unload (%s)",
+            type(err).__name__,
+        )
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete every private token store associated with a removed entry."""
+    stores = hass.data.get(AUTH_STORES_DATA, {}).pop(entry.entry_id, [])
+    removed_store_keys = set()
+    for auth_store in stores:
+        removed_store_keys.add(auth_store.key)
+        await auth_store.async_remove()
+
+    # Cover entries created before the in-memory registry existed, and legacy
+    # entries whose account was overridden in options.
+    usernames = {
+        str(config.get(CONF_USERNAME, ""))
+        for config in (entry.data, entry.options)
+        if config.get(CONF_USERNAME)
+    }
+    for username in usernames:
+        auth_store = _auth_store_for(hass, username)
+        if auth_store.key not in removed_store_keys:
+            await auth_store.async_remove()
+
+    if not hass.data.get(AUTH_STORES_DATA):
+        hass.data.pop(AUTH_STORES_DATA, None)
 
 
 class VolvoCoordinator(DataUpdateCoordinator):
@@ -440,6 +580,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
         powertrain_type=DEFAULT_POWERTRAIN_TYPE,
         *,
         config_entry: ConfigEntry | None = None,
+        polling_schedule: PollingSchedule | None = None,
     ):
         """Initialize my coordinator."""
         super().__init__(
@@ -482,6 +623,142 @@ class VolvoCoordinator(DataUpdateCoordinator):
         self._absent_cycles = {}
         # VIN -> (consecutive stop failures, monotonic time to retry after).
         self._charge_limit_stop_failures = {}
+        self._reload_for_new_vehicle_pending = False
+        self._server_retry_after_monotonic = 0.0
+        # Authentication-class failures back the whole cycle off.
+        self._login_forbidden = 0
+        self._auth_failure_streak = 0
+        self._auth_backoff_until_monotonic = 0.0
+        # Monotonic time of the first failure in the current streak.
+        self._first_failure_monotonic = None
+        # Dynamic polling. With no schedule the configured scan interval is
+        # used as is and none of this state is touched.
+        self._base_scan_interval = scan_interval
+        self._polling_schedule = polling_schedule
+        self.polling_mode = POLLING_MODE_FIXED
+        self._last_in_use_monotonic = None
+        self._real_polls = 0
+        self._real_polls_at_last_interval = 0
+        self._degraded_fast_retries = 0
+        self._apply_polling_interval()
+
+    def set_polling_config(
+        self, scan_interval, polling_schedule: PollingSchedule | None
+    ) -> None:
+        """Apply a changed scan interval and/or dynamic schedule."""
+        self._base_scan_interval = scan_interval
+        self._polling_schedule = polling_schedule
+        self.update_interval = timedelta(seconds=scan_interval)
+        if polling_schedule is None:
+            self.polling_mode = POLLING_MODE_FIXED
+            self._degraded_fast_retries = 0
+            for vehicle in self._vehicles.values():
+                vehicle.cache_age_allowance = timedelta(0)
+        self._apply_polling_interval()
+
+    @staticmethod
+    def _vehicle_in_use(vehicle) -> bool:
+        return (
+            getattr(vehicle, "engine_running", None) is True
+            or getattr(vehicle, "engine_remote_running", None) is True
+        )
+
+    def _vehicle_charging(self, vehicle) -> bool:
+        if not self.supports_electric:
+            return False
+        if getattr(vehicle, "battery_charging_status", None) == "charging":
+            return True
+        if (
+            getattr(vehicle, "home_charge_status", None)
+            in ACTIVE_HOME_CHARGE_STATES
+        ):
+            return True
+        power = getattr(vehicle, "charging_power", None)
+        return isinstance(power, (int, float)) and power > 0
+
+    @staticmethod
+    def _vehicle_degraded(vehicle) -> bool:
+        if getattr(vehicle, "_consecutive_failures", 0):
+            return True
+        statuses = getattr(vehicle, "_data_source_status", None)
+        return isinstance(statuses, dict) and any(
+            status is False for status in statuses.values()
+        )
+
+    def _apply_polling_interval(self) -> None:
+        """Pick the next poll delay from the clock and the vehicles' state.
+
+        Runs after every update pass. Home Assistant reads update_interval
+        when it arms the next refresh, which happens right after
+        _async_update_data returns or raises, so setting it here takes effect
+        for the very next poll.
+        """
+        schedule = self._polling_schedule
+        if schedule is None:
+            return
+
+        now_monotonic = time.monotonic()
+        vehicles = [
+            vehicle
+            for vehicle in self._vehicles.values()
+            if not getattr(vehicle, "is_unbound", False)
+        ]
+        if any(self._vehicle_in_use(vehicle) for vehicle in vehicles):
+            self._last_in_use_monotonic = now_monotonic
+        in_use = (
+            self._last_in_use_monotonic is not None
+            and now_monotonic - self._last_in_use_monotonic
+            <= IN_USE_LINGER_SECONDS
+        )
+        charging = any(self._vehicle_charging(vehicle) for vehicle in vehicles)
+
+        now = dt_util.now()
+        mode, mode_interval = schedule.select(
+            now, in_use=in_use, charging=charging
+        )
+        interval = float(mode_interval)
+
+        boundary = schedule.seconds_until_faster(now, interval)
+        if boundary is not None:
+            # One second past the boundary, so the poll that fires there
+            # already sees the new mode.
+            interval = max(boundary + 1.0, float(MIN_SCAN_INTERVAL))
+
+        polled = self._real_polls != self._real_polls_at_last_interval
+        self._real_polls_at_last_interval = self._real_polls
+        if self._consecutive_failures > 0:
+            interval = min(interval, POLL_RETRY_INTERVAL_SECONDS)
+        elif any(self._vehicle_degraded(vehicle) for vehicle in vehicles):
+            if polled:
+                self._degraded_fast_retries += 1
+            if self._degraded_fast_retries <= DEGRADED_FAST_RETRY_CYCLES:
+                interval = min(interval, POLL_RETRY_INTERVAL_SECONDS)
+        else:
+            self._degraded_fast_retries = 0
+
+        # A source cache is normally one poll old when it has to stand in for
+        # a failed refresh. With long intervals that alone would exceed the
+        # short limit on lock/door data, blanking the lock on a single missed
+        # poll, so the limit is extended by the interval the mode asks for.
+        allowance = timedelta(seconds=mode_interval)
+        for vehicle in self._vehicles.values():
+            vehicle.cache_age_allowance = allowance
+
+        if (
+            mode != self.polling_mode
+            or self.update_interval is None
+            or abs(self.update_interval.total_seconds() - interval) >= 1
+        ):
+            _LOGGER.debug(
+                "Dynamic polling: mode=%s, next poll in %.0fs "
+                "(in_use=%s, charging=%s)",
+                mode,
+                interval,
+                in_use,
+                charging,
+            )
+        self.polling_mode = mode
+        self.update_interval = timedelta(seconds=interval)
 
     async def _async_get_vehicle_map(self):
         """Fetch the account's vehicles, re-authenticating once on 401/403.
@@ -504,9 +781,17 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
     def _vehicle_for(self, vin, vehicleInfos):
         """Return the reusable Vehicle for a VIN, creating it on first sight."""
+        vehicleInfos = vehicleInfos if isinstance(vehicleInfos, dict) else {}
         vehicle = self._vehicles.get(vin)
         if vehicle is None:
-            modelYear = int(vehicleInfos.get("modelYear", 2020))
+            try:
+                modelYear = int(vehicleInfos.get("modelYear") or 2020)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "Invalid model year for %s; using the compatibility default",
+                    vehicle_log_ref(vin),
+                )
+                modelYear = 2020
             isAaos = modelYear >= 2022
             vehicle = Vehicle(
                 vin,
@@ -517,6 +802,18 @@ class VolvoCoordinator(DataUpdateCoordinator):
             )
             self._vehicles[vin] = vehicle
             self._vehicle_order.append(vin)
+            # Platforms enumerate vehicles only during entry setup. If a car
+            # is bound later, reload once so HA creates its entities instead
+            # of keeping it invisible until the next manual restart.
+            if (
+                self.data is not None
+                and self.config_entry is not None
+                and not self._reload_for_new_vehicle_pending
+            ):
+                self._reload_for_new_vehicle_pending = True
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id
+                )
         else:
             # The API object may have been replaced after an options change.
             vehicle._api = self.volvo_api
@@ -561,8 +858,63 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 )
             vehicle.is_unbound = True
 
+    def _scan_interval_seconds(self) -> float:
+        if self.update_interval is None:
+            return float(DEFAULT_SCAN_INTERVAL)
+        return self.update_interval.total_seconds()
+
+    def _throttle_interval_seconds(self) -> float:
+        """Return the interval that early, unforced refreshes are held to.
+
+        With dynamic polling the current interval can be half an hour; an
+        explicit refresh request (homeassistant.update_entity) should not be
+        answered from cache for that long. The fastest configured interval is
+        a rate the user has already accepted.
+        """
+        interval = self._scan_interval_seconds()
+        if self._polling_schedule is not None:
+            interval = min(interval, self._polling_schedule.fastest_interval)
+        return interval
+
+    def _may_serve_cached_data(self, now) -> bool:
+        """Return whether cached data is still fresh enough to stand in.
+
+        Bounded by failure count and by time: polls suppressed by a backoff
+        window are not counted as failures, so the count alone would let
+        entities show a frozen snapshot for the whole window.
+        """
+        if self.data is None:
+            return False
+        if self._consecutive_failures > FAILURE_GRACE_CYCLES:
+            return False
+        if self._first_failure_monotonic is None:
+            return True
+        grace = max(
+            FAILURE_GRACE_CYCLES * self._scan_interval_seconds(),
+            MIN_CACHED_DATA_GRACE_SECONDS,
+        )
+        return now - self._first_failure_monotonic <= grace
+
+    def _note_auth_failure(self) -> None:
+        """Back the poll cycle off exponentially after an auth-class failure."""
+        self._auth_failure_streak += 1
+        delay = min(
+            AUTH_BACKOFF_BASE_SECONDS
+            * (2 ** min(self._auth_failure_streak - 1, 10)),
+            AUTH_BACKOFF_MAX_SECONDS,
+        )
+        self._auth_backoff_until_monotonic = time.monotonic() + delay
+        _LOGGER.warning(
+            "Authentication failure #%s; pausing Volvo polling for %ss",
+            self._auth_failure_streak,
+            delay,
+        )
+
     def _handle_update_failure(self, err):
         """Serve cached data during short outages, go unavailable on long ones."""
+        now = time.monotonic()
+        if self._consecutive_failures == 0 or self._first_failure_monotonic is None:
+            self._first_failure_monotonic = now
         self._consecutive_failures += 1
         self._last_failure_reason = redact_sensitive(err)
         _LOGGER.error(
@@ -571,10 +923,7 @@ class VolvoCoordinator(DataUpdateCoordinator):
             self._last_failure_reason,
         )
 
-        if (
-            self.data is not None
-            and self._consecutive_failures <= FAILURE_GRACE_CYCLES
-        ):
+        if self._may_serve_cached_data(now):
             _LOGGER.warning(
                 "Returning cached vehicle data due to update failure (%s/%s "
                 "before entities become unavailable)",
@@ -586,13 +935,21 @@ class VolvoCoordinator(DataUpdateCoordinator):
         # No data at all (first load) or the grace window is exhausted:
         # let entities show unavailable instead of stale values forever.
         raise UpdateFailed(
-            f"Error communicating with API: {self._last_failure_reason}"
+            f"Error communicating with API: {self._last_failure_reason}",
+            retry_after=getattr(err, "retry_after", None),
         ) from err
 
     async def _async_update_data(self):
+        """Fetch data, then choose the delay before the next poll."""
+        try:
+            return await self._async_poll_vehicles()
+        finally:
+            self._apply_polling_interval()
+
+    async def _async_poll_vehicles(self):
         """Fetch data from API endpoint with caching and failure grading."""
         async with self._update_lock:
-            now = datetime.now(timezone.utc)
+            now = time.monotonic()
             # Consume one forced-refresh token, if any caller queued one.
             task = asyncio.current_task()
             caller_token = (
@@ -618,12 +975,38 @@ class VolvoCoordinator(DataUpdateCoordinator):
                         self._force_refresh_tokens.pop(0)
             if force_refresh and caller_token is None:
                 _LOGGER.debug("Scheduled poll consumed a forced refresh token")
+            blocked_until = max(
+                self._server_retry_after_monotonic,
+                self._auth_backoff_until_monotonic,
+            )
+            if now < blocked_until:
+                retry_after = blocked_until - now
+                if self._may_serve_cached_data(now):
+                    _LOGGER.debug(
+                        "Skipping Volvo refresh for %.1fs (rate limit or "
+                        "authentication backoff)",
+                        retry_after,
+                    )
+                    return self.data
+                raise UpdateFailed(
+                    "Volvo API backoff window is still active: "
+                    f"{self._last_failure_reason}",
+                    retry_after=retry_after,
+                )
+            # Home Assistant arms the next poll exactly one interval after
+            # the previous one fired whenever that poll finished within the
+            # same wall-clock second, so event-loop jitter of a few
+            # microseconds made a strict comparison drop scheduled polls and
+            # silently double the interval. The margin only has to separate
+            # those from genuinely early, unforced refresh requests.
+            scan_interval = self._throttle_interval_seconds()
+            throttle_window = max(scan_interval - 1.0, scan_interval * 0.9)
             if (
                 not force_refresh
                 and self.data is not None
                 and self._last_update_started_at is not None
                 and self.update_interval is not None
-                and now - self._last_update_started_at < self.update_interval
+                and now - self._last_update_started_at < throttle_window
             ):
                 if self._consecutive_failures > FAILURE_GRACE_CYCLES:
                     # The grace window is already exhausted and entities are
@@ -642,47 +1025,85 @@ class VolvoCoordinator(DataUpdateCoordinator):
                 return self.data
 
             self._last_update_started_at = now
+            self._real_polls += 1
 
             try:
-                async with asyncio.timeout(UPDATE_CYCLE_TIMEOUT):
+                async with asyncio.timeout(UPDATE_CYCLE_TIMEOUT) as cycle_timeout:
                     await self.volvo_api.login()
                     await self.volvo_api.update_token()
 
                     vinVehicleMaps = await self._async_get_vehicle_map()
+                    if not vinVehicleMaps and not self._vehicles:
+                        raise RuntimeError(
+                            "The account returned no vehicles; setup will retry"
+                        )
+                    vehicle_batches = (
+                        len(vinVehicleMaps)
+                        + MAX_CONCURRENT_VEHICLE_UPDATES
+                        - 1
+                    ) // MAX_CONCURRENT_VEHICLE_UPDATES
+                    if vehicle_batches:
+                        cycle_timeout.reschedule(
+                            asyncio.get_running_loop().time()
+                            + VEHICLE_BATCH_TIMEOUT * vehicle_batches
+                        )
                     vehicles = []
                     store_datas = []
+                    semaphore = asyncio.Semaphore(
+                        MAX_CONCURRENT_VEHICLE_UPDATES
+                    )
 
-                    for vin, vehicleInfos in vinVehicleMaps.items():
-                        vehicle = self._vehicle_for(vin, vehicleInfos)
+                    async def update_vehicle(vin, vehicle_infos):
+                        async with semaphore:
+                            try:
+                                vehicle = self._vehicle_for(vin, vehicle_infos)
+                                await vehicle.update()
+                            except Exception as err:
+                                vehicle = self._vehicles.get(vin)
+                                if vehicle is not None:
+                                    vehicle._consecutive_failures += 1
+                                    failure_count = vehicle._consecutive_failures
+                                else:
+                                    failure_count = 1
+                                _LOGGER.error(
+                                    "Failed to update %s (failure #%d): %s",
+                                    vehicle_log_ref(vin),
+                                    failure_count,
+                                    redact_sensitive(err),
+                                )
+                                return False
 
-                        # Try to update, but don't fail completely
-                        try:
-                            await vehicle.update()
                             vehicle._consecutive_failures = 0
-                            # Note: _last_successful_update is updated by _save_to_cache() in each parse method
-                        except Exception as err:
-                            vehicle._consecutive_failures += 1
-                            _LOGGER.error(
-                                "Failed to update %s (failure #%d): %s",
-                                vehicle_log_ref(vin),
-                                vehicle._consecutive_failures,
-                                redact_sensitive(err),
-                            )
-                            # Don't raise - continue with cached data
+                            store_data = await self._store_for(vin)
+                            if self.supports_electric:
+                                await store_data.async_capture_full_charge_range(
+                                    vehicle.battery_charge_level_percentage,
+                                    vehicle.electric_range,
+                                    datetime.now(timezone.utc).isoformat(),
+                                    vehicle.charge_data_source,
+                                    vehicle.battery_charging_status,
+                                    vehicle.charging_power,
+                                )
+                                await self._async_enforce_charge_limit(
+                                    vehicle, store_data
+                                )
+                            return True
 
-                        store_data = await self._store_for(vin)
-                        if self.supports_electric:
-                            await store_data.async_capture_full_charge_range(
-                                vehicle.battery_charge_level_percentage,
-                                vehicle.electric_range,
-                                datetime.now(timezone.utc).isoformat(),
-                                vehicle.charge_data_source,
-                                vehicle.battery_charging_status,
-                                vehicle.charging_power,
+                    update_tasks = []
+                    async with asyncio.TaskGroup() as task_group:
+                        for vin, vehicleInfos in vinVehicleMaps.items():
+                            update_tasks.append(
+                                task_group.create_task(
+                                    update_vehicle(vin, vehicleInfos)
+                                )
                             )
-                            await self._async_enforce_charge_limit(
-                                vehicle, store_data
-                            )
+
+                    if update_tasks and not any(
+                        task.result() for task in update_tasks
+                    ):
+                        raise RuntimeError(
+                            "No vehicle data source refreshed successfully"
+                        )
 
                     # A vehicle missing from one listing (account hiccup, car
                     # resold) keeps its last object so entity indexes stay
@@ -702,22 +1123,46 @@ class VolvoCoordinator(DataUpdateCoordinator):
 
                     # Track successful update
                     self._consecutive_failures = 0
+                    self._first_failure_monotonic = None
                     self._login_rejections = 0
+                    self._login_forbidden = 0
+                    self._auth_failure_streak = 0
+                    self._auth_backoff_until_monotonic = 0.0
+                    self._server_retry_after_monotonic = 0.0
                     self.store_datas = store_datas
                     return vehicles
 
+            except VolvoRateLimitError as err:
+                if err.retry_after is not None:
+                    self._server_retry_after_monotonic = time.monotonic() + min(
+                        err.retry_after, MAX_SERVER_RETRY_AFTER
+                    )
+                return self._handle_update_failure(err)
             except VolvoAuthThrottledError as err:
                 # The local cooldown refused a password login; not a verdict
                 # on the credentials, just wait for the next cycle.
                 return self._handle_update_failure(err)
             except VolvoAuthError as err:
-                self._login_rejections += 1
-                if self._login_rejections >= LOGIN_REJECTION_REAUTH_THRESHOLD:
-                    # Repeated explicit credential rejections: stop polling
-                    # and ask the user to re-enter the password.
+                if isinstance(err, VolvoAuthForbiddenError):
+                    self._login_forbidden += 1
+                else:
+                    self._login_rejections += 1
+                if (
+                    self._login_rejections >= LOGIN_REJECTION_REAUTH_THRESHOLD
+                    or self._login_forbidden
+                    >= LOGIN_FORBIDDEN_REAUTH_THRESHOLD
+                ):
+                    # Repeated rejections: stop polling and ask the user to
+                    # re-enter the password.
                     raise ConfigEntryAuthFailed(
                         redact_sensitive(err)
                     ) from err
+                self._note_auth_failure()
+                return self._handle_update_failure(err)
+            except VolvoAuthExpiredError as err:
+                # The session is still rejected after the in-cycle refresh,
+                # or the refresh endpoint itself answered 403.
+                self._note_auth_failure()
                 return self._handle_update_failure(err)
             except ConfigEntryAuthFailed:
                 raise
@@ -779,7 +1224,11 @@ class VolvoCoordinator(DataUpdateCoordinator):
             battery_value = float(battery_level)
         except (TypeError, ValueError):
             return
-        if battery_value < limit:
+        if (
+            not math.isfinite(battery_value)
+            or not 0 <= battery_value <= 100
+            or battery_value < limit
+        ):
             return
 
         home_charge_status = str(vehicle.home_charge_status or "").lower()
@@ -1340,6 +1789,11 @@ class VolvoEntity(CoordinatorEntity):
     def available(self) -> bool:
         vehicle = self.vehicle
         if vehicle is None or getattr(vehicle, "is_unbound", False):
+            return False
+        if (
+            getattr(vehicle, "_consecutive_failures", 0)
+            > FAILURE_GRACE_CYCLES
+        ):
             return False
         return super().available
 

@@ -1,5 +1,6 @@
 """Home charge-pile tests replaying payloads captured from the Volvo app."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -175,6 +176,174 @@ async def test_charge_order_history_is_cached_between_poll_cycles():
     assert first == orders
     assert second == orders
     api.digitalvolvo_post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pile_reads_are_single_flight():
+    """Concurrent readers for one VIN must share one network request."""
+    api = _api(_pile_list(PILE_IDLE))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_get(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return _pile_list(PILE_IDLE)
+
+    api.digitalvolvo_get = AsyncMock(side_effect=delayed_get)
+    first = asyncio.create_task(api.get_charge_piles(VIN, SERIES_CODE))
+    await entered.wait()
+    second = asyncio.create_task(api.get_charge_piles(VIN, SERIES_CODE))
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [
+        [PILE_IDLE],
+        [PILE_IDLE],
+    ]
+    api.digitalvolvo_get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_forced_pile_reads_join_the_same_inflight_request():
+    """Force bypasses an old cache, not a request already fetching fresh data."""
+    api = _api(_pile_list(PILE_IDLE))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_get(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return _pile_list(PILE_IDLE)
+
+    api.digitalvolvo_get = AsyncMock(side_effect=delayed_get)
+    first = asyncio.create_task(
+        api.get_charge_piles(VIN, SERIES_CODE, force_refresh=True)
+    )
+    await entered.wait()
+    second = asyncio.create_task(
+        api.get_charge_piles(VIN, SERIES_CODE, force_refresh=True)
+    )
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [
+        [PILE_IDLE],
+        [PILE_IDLE],
+    ]
+    api.digitalvolvo_get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invalidation_prevents_inflight_pile_cache_resurrection():
+    """An old in-flight GET must not repopulate a cache a control evicted."""
+    api = _api(_pile_list(PILE_IDLE))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_get(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return _pile_list(PILE_IDLE)
+
+    api.digitalvolvo_get = AsyncMock(side_effect=delayed_get)
+    request = asyncio.create_task(api.get_charge_piles(VIN, SERIES_CODE))
+    await entered.wait()
+    api._invalidate_charge_piles(VIN)
+    release.set()
+
+    assert await request == [PILE_IDLE]
+    assert VIN not in api._charge_piles_cache
+
+    api.digitalvolvo_get.side_effect = None
+    api.digitalvolvo_get.return_value = _pile_list(PILE_CHARGING)
+    assert await api.get_charge_piles(VIN, SERIES_CODE) == [PILE_CHARGING]
+    assert api.digitalvolvo_get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pile_ttl_uses_monotonic_time_after_response(monkeypatch):
+    """Network latency must not consume a pile cache entry's TTL."""
+    api = _api(_pile_list(PILE_IDLE))
+    fake_time = MagicMock()
+    fake_time.monotonic.side_effect = (100.0, 100.0, 125.0)
+    monkeypatch.setattr(
+        "custom_components.volvooncall_cn.volvooncall_base.time",
+        fake_time,
+    )
+
+    await api.get_charge_piles(VIN, SERIES_CODE)
+
+    assert api._charge_piles_cache[VIN][1] == 140.0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_order_reads_are_single_flight():
+    """Order history readers for one connector share one API response."""
+    api = _api(_pile_list(PILE_IDLE))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    orders = [{"orderNo": "TEST_ORDER"}]
+
+    async def delayed_post(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return {"success": True, "data": orders}
+
+    api.digitalvolvo_post = AsyncMock(side_effect=delayed_post)
+    first = asyncio.create_task(
+        api.get_charge_order_list(connector_id="TEST_CONNECTOR")
+    )
+    await entered.wait()
+    second = asyncio.create_task(
+        api.get_charge_order_list(connector_id="TEST_CONNECTOR")
+    )
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [orders, orders]
+    api.digitalvolvo_post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invalidation_prevents_inflight_order_cache_resurrection():
+    """An invalidated in-flight order response must not become cached."""
+    api = _api(_pile_list(PILE_IDLE))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_post(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return {"success": True, "data": [{"orderNo": "STALE"}]}
+
+    api.digitalvolvo_post = AsyncMock(side_effect=delayed_post)
+    request = asyncio.create_task(
+        api.get_charge_order_list(connector_id="TEST_CONNECTOR")
+    )
+    await entered.wait()
+    api._invalidate_charge_orders("TEST_CONNECTOR")
+    release.set()
+
+    assert await request == [{"orderNo": "STALE"}]
+    assert "TEST_CONNECTOR" not in api._charge_order_cache
+
+
+@pytest.mark.asyncio
+async def test_order_ttl_uses_monotonic_time_after_response(monkeypatch):
+    """Network latency must not consume an order cache entry's TTL."""
+    api = _api(_pile_list(PILE_IDLE))
+    api.digitalvolvo_post.return_value = {"success": True, "data": []}
+    fake_time = MagicMock()
+    fake_time.monotonic.side_effect = (100.0, 100.0, 125.0)
+    monkeypatch.setattr(
+        "custom_components.volvooncall_cn.volvooncall_base.time",
+        fake_time,
+    )
+
+    await api.get_charge_order_list(connector_id="TEST_CONNECTOR")
+
+    assert api._charge_order_cache["TEST_CONNECTOR"][1] == 1925.0
 
 
 @pytest.mark.asyncio
@@ -407,7 +576,10 @@ async def test_stop_evicts_the_cached_order_history():
         return_value={"success": True, "data": {"startChargeSeqStat": 3}}
     )
     connector_id = PILE_CHARGING["connectorId"]
-    api._charge_order_cache[connector_id] = (["stale_order"], time.time() + 999)
+    api._charge_order_cache[connector_id] = (
+        ["stale_order"],
+        time.monotonic() + 999,
+    )
 
     await api.stop_charge_pile(TRADE_NO, VIN, SERIES_CODE)
 
@@ -422,7 +594,10 @@ async def test_start_evicts_the_cached_order_history():
         return_value={"success": True, "data": {"startChargeSeq": TRADE_NO}}
     )
     connector_id = PILE_IDLE["connectorId"]
-    api._charge_order_cache[connector_id] = (["stale_order"], time.time() + 999)
+    api._charge_order_cache[connector_id] = (
+        ["stale_order"],
+        time.monotonic() + 999,
+    )
 
     await api.start_charge_pile(VIN, SERIES_CODE)
 

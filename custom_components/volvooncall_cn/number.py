@@ -88,10 +88,17 @@ class VolvoChargeLimitNumber(VolvoEntity, NumberEntity):
         store_data = self._get_store()
         if store_data is None:
             return
+        previous_limit = store_data.get_charge_limit()
         await store_data.set_charge_limit(value)
+        new_limit = store_data.get_charge_limit()
         self.async_write_ha_state()
         # A lowered limit may already be reached; re-poll so the coordinator
         # can stop an active home-charge session right away.
+        if (
+            new_limit >= previous_limit
+            or new_limit >= CHARGE_LIMIT_DISABLED
+        ):
+            return
         await async_refresh_after_control(
             self.coordinator,
             description="Charge limit",

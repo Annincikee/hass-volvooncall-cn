@@ -1,10 +1,11 @@
 """Tests for the persisted charge limit and its home-charge auto-stop."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.volvooncall_cn import VolvoCoordinator
+from custom_components.volvooncall_cn.number import VolvoChargeLimitNumber
 from custom_components.volvooncall_cn.store import (
     CHARGE_LIMIT_DISABLED,
     CHARGE_LIMIT_MIN,
@@ -107,6 +108,65 @@ async def test_enforce_skips_without_battery_reading(hass):
     await coordinator._async_enforce_charge_limit(vehicle, store)
 
     vehicle.stop_home_charge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "battery_level",
+    [float("nan"), float("inf"), float("-inf"), -1, 101],
+)
+async def test_enforce_rejects_non_finite_or_out_of_range_soc(
+    hass, battery_level
+):
+    """Malformed telemetry must never stop a real charging session."""
+    coordinator = VolvoCoordinator(hass, MagicMock(), TEST_SCAN_INTERVAL)
+    store = await _store_with_limit(hass, 80)
+    vehicle = _mock_vehicle(battery_level, "charging")
+
+    await coordinator._async_enforce_charge_limit(vehicle, store)
+
+    vehicle.stop_home_charge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_limit", "new_limit"),
+    [(80, 90), (80, 100), (80, 80)],
+)
+async def test_charge_limit_non_decrease_does_not_force_poll(
+    previous_limit, new_limit
+):
+    """Raising, disabling, or re-saving the limit is a local-only change."""
+    store = MagicMock()
+    store.get_charge_limit.side_effect = [previous_limit, new_limit]
+    store.set_charge_limit = AsyncMock()
+    entity = MagicMock()
+    entity._get_store.return_value = store
+
+    with patch(
+        "custom_components.volvooncall_cn.number.async_refresh_after_control",
+        new=AsyncMock(),
+    ) as refresh:
+        await VolvoChargeLimitNumber.async_set_native_value(entity, new_limit)
+
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lowered_charge_limit_forces_one_poll():
+    store = MagicMock()
+    store.get_charge_limit.side_effect = [90, 80]
+    store.set_charge_limit = AsyncMock()
+    entity = MagicMock()
+    entity._get_store.return_value = store
+
+    with patch(
+        "custom_components.volvooncall_cn.number.async_refresh_after_control",
+        new=AsyncMock(),
+    ) as refresh:
+        await VolvoChargeLimitNumber.async_set_native_value(entity, 80)
+
+    refresh.assert_awaited_once()
 
 
 @pytest.mark.asyncio

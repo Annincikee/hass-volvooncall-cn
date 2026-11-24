@@ -1,7 +1,11 @@
 """Security regression tests."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from packaging.requirements import Requirement
+from packaging.version import Version
 import pytest
 
 from custom_components.volvooncall_cn.volvooncall_base import (
@@ -10,6 +14,27 @@ from custom_components.volvooncall_cn.volvooncall_base import (
     redact_sensitive,
     vehicle_log_ref,
 )
+
+
+def test_manifest_excludes_known_vulnerable_protobuf_versions():
+    """Keep the runtime floor above every affected protobuf release line."""
+    manifest_path = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "volvooncall_cn"
+        / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    protobuf_requirement = next(
+        Requirement(requirement)
+        for requirement in manifest["requirements"]
+        if Requirement(requirement).name == "protobuf"
+    )
+
+    for vulnerable_version in ("5.27.2", "5.29.5", "6.30.0", "6.33.4"):
+        assert Version(vulnerable_version) not in protobuf_requirement.specifier
+    for patched_version in ("6.33.5", "6.33.6"):
+        assert Version(patched_version) in protobuf_requirement.specifier
 
 
 def test_redact_sensitive_removes_tokens_from_log_strings():
@@ -49,6 +74,27 @@ def test_redact_sensitive_removes_tokens_from_log_strings():
     assert "refreshToken=<redacted>" in redacted
     assert "authorization: <redacted>" in redacted
     assert "X-Token: <redacted>" in redacted
+
+
+def test_redact_sensitive_removes_all_quoted_token_values_with_spaces():
+    raw = (
+        '"accessToken": "access secret with spaces", '
+        "'globalAccessToken': 'global secret with spaces', "
+        '"jwtToken"="jwt secret with spaces", '
+        "refreshToken='refresh secret with spaces'"
+    )
+
+    redacted = redact_sensitive(raw)
+
+    for secret_fragment in (
+        "access secret",
+        "global secret",
+        "jwt secret",
+        "refresh secret",
+        "with spaces",
+    ):
+        assert secret_fragment not in redacted
+    assert redacted.count("<redacted>") == 4
 
 
 def test_vehicle_log_ref_is_stable_and_does_not_expose_vin():

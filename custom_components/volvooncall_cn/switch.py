@@ -97,9 +97,12 @@ class VolvoSwitchEntity(VolvoEntity, SwitchEntity):
         vehicle = self.vehicle
         if vehicle is None:
             return None
-        for key in self.checkMetaKeys:
-            if vehicle.get(key):
-                return True
+        states = [vehicle.get(key) for key in self.checkMetaKeys]
+        if any(states):
+            return True
+        # Unknown everywhere (no source has answered yet) is not "off".
+        if all(state is None for state in states):
+            return None
         return False
 
 
