@@ -232,8 +232,9 @@ def test_boundary_cap_ignores_slower_and_distant_boundaries():
     ) is None
 
 
-def test_from_config_disabled_by_default():
-    assert PollingSchedule.from_config({}) is None
+def test_from_config_enabled_by_default():
+    """Entries created before the option existed get the default schedule."""
+    assert PollingSchedule.from_config({}) == PollingSchedule()
     assert PollingSchedule.from_config({CONF_DYNAMIC_POLLING: False}) is None
 
 
@@ -483,6 +484,44 @@ async def test_manual_refresh_is_not_throttled_for_the_whole_night_interval(
     )
 
 
+async def test_setup_entry_without_the_option_polls_dynamically(
+    hass: HomeAssistant,
+):
+    """An upgraded entry (no stored option) starts in dynamic mode."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_USERNAME: "TEST_USERNAME",
+            CONF_PASSWORD: "TEST_PASSWORD",
+            CONF_SCAN_INTERVAL: 30,
+        },
+        unique_id="TEST_USERNAME",
+    )
+    entry.add_to_hass(hass)
+    api = AsyncMock()
+    api.set_token_listener = MagicMock()
+    api.export_tokens = MagicMock(return_value={})
+    api.get_vehicles_vins = AsyncMock(
+        return_value={VIN: {"modelYear": "2024"}}
+    )
+    with (
+        patch(NOW_PATCH, return_value=_at(2)),
+        patch(
+            "custom_components.volvooncall_cn.VehicleAPI", return_value=api
+        ),
+        patch(
+            "custom_components.volvooncall_cn.Vehicle.update", new=AsyncMock()
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert coordinator.polling_mode == POLLING_MODE_NIGHT
+        assert coordinator.update_interval == timedelta(
+            seconds=DEFAULT_NIGHT_SCAN_INTERVAL
+        )
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_update_options_switches_dynamic_polling_on_and_off(
     hass: HomeAssistant,
 ):
@@ -705,6 +744,35 @@ async def test_options_flow_rejects_bad_settings_before_any_login(
     assert result["errors"] == {"base": error}
     validation.assert_not_awaited()
     assert CONF_DYNAMIC_POLLING not in entry.options
+
+
+async def test_options_flow_can_switch_dynamic_polling_off(hass):
+    entry = _entry(hass)
+    result, _validation = await _submit(
+        hass,
+        entry,
+        {
+            CONF_PASSWORD: "",
+            CONF_SCAN_INTERVAL: 45,
+            CONF_POWERTRAIN_TYPE: POWERTRAIN_HYBRID,
+            CONF_DYNAMIC_POLLING: False,
+        },
+    )
+    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_DYNAMIC_POLLING] is False
+    assert PollingSchedule.from_config({**entry.data, **entry.options}) is None
+
+
+async def test_initial_flow_offers_the_dynamic_polling_switch(hass):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    defaults = {
+        marker.schema: marker.default()
+        for marker in result["data_schema"].schema
+        if marker.schema == CONF_DYNAMIC_POLLING
+    }
+    assert defaults == {CONF_DYNAMIC_POLLING: True}
 
 
 async def test_options_flow_rejects_out_of_range_interval(hass):

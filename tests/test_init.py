@@ -24,6 +24,7 @@ from custom_components.volvooncall_cn import (
 )
 from custom_components.volvooncall_cn.config_flow import volvo_validation
 from custom_components.volvooncall_cn.const import (
+    CONF_DYNAMIC_POLLING,
     CONF_POWERTRAIN_TYPE,
     POWERTRAIN_HYBRID,
     VALIDATED_TOKENS_DATA,
@@ -86,7 +87,9 @@ class TestIntegrationSetup:
             data={
                 CONF_USERNAME: TEST_USERNAME,
                 CONF_PASSWORD: TEST_PASSWORD,
-                # No CONF_SCAN_INTERVAL specified
+                # No CONF_SCAN_INTERVAL specified. Dynamic polling is on by
+                # default and would replace the fixed interval under test.
+                CONF_DYNAMIC_POLLING: False,
             },
             unique_id=TEST_USERNAME,
         )
@@ -277,7 +280,13 @@ class TestUpdateOptions:
             
             # Update options with new scan interval
             new_scan_interval = 120
-            hass.config_entries.async_update_entry(config_entry, options={CONF_SCAN_INTERVAL: new_scan_interval})
+            hass.config_entries.async_update_entry(
+                config_entry,
+                options={
+                    CONF_SCAN_INTERVAL: new_scan_interval,
+                    CONF_DYNAMIC_POLLING: False,
+                },
+            )
             
             with patch.object(coordinator, "_schedule_refresh") as reschedule:
                 await async_update_options(hass, config_entry)
