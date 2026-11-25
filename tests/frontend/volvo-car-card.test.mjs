@@ -87,7 +87,7 @@ test("supports per-entity overrides for renamed HA entities", () => {
   );
   assert.equal(
     card._entityId("climatization"),
-    "switch.testvin0000000001_climatization",
+    "button.testvin0000000001_climatization",
   );
 });
 
@@ -295,15 +295,15 @@ test("cancelling a dangerous action does not call a service", async () => {
   assert.deepEqual(calls, []);
 });
 
-test("calls climatization switch after confirmation", async () => {
+test("calls climatization button after confirmation", async () => {
   const calls = [];
   window.confirm = () => true;
   const card = new VolvoCarCard();
   card.setConfig({ vin: "TESTVIN0000000001" });
   card.hass = {
     states: {
-      "switch.testvin0000000001_climatization": {
-        entity_id: "switch.testvin0000000001_climatization",
+      "button.testvin0000000001_climatization": {
+        entity_id: "button.testvin0000000001_climatization",
         state: "off",
         attributes: {},
       },
@@ -315,9 +315,9 @@ test("calls climatization switch after confirmation", async () => {
 
   assert.deepEqual(calls, [
     [
-      "switch",
-      "turn_on",
-      { entity_id: "switch.testvin0000000001_climatization" },
+      "button",
+      "press",
+      { entity_id: "button.testvin0000000001_climatization" },
     ],
   ]);
 });
