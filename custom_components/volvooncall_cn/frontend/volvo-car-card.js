@@ -1,4 +1,4 @@
-const CARD_VERSION = "2.2.0";
+const CARD_VERSION = "2.2.1";
 
 const MODEL_ASSETS = {
   s90: new URL("./assets/car-s90-black-card.webp", import.meta.url).href,
@@ -40,11 +40,11 @@ const ENTITY_DEFINITIONS = {
   ta_average_speed: ["sensor", "ta_average_speed"],
   connection: ["sensor", "connection_status"],
   engine_control: ["switch", "engine_remote_control"],
-  climatization: ["switch", "climatization"],
   tailgate_control: ["switch", "tailgate_control"],
   sunroof_control: ["switch", "sunroof_control"],
   flash: ["button", "flash"],
   honk_flash: ["button", "honk_and_flash"],
+  climatization: ["button", "climatization"],
 };
 
 const BODY_PARTS = [
@@ -63,12 +63,12 @@ const BODY_PARTS = [
 
 const CONTROL_DEFINITIONS = [
   ["lock", "lock", "车锁", "mdi:lock-outline"],
-  ["climatization", "switch", "温度调节", "mdi:air-conditioner"],
   ["engine_control", "switch", "远程启动", "mdi:engine-outline"],
   ["tailgate_control", "switch", "后备箱", "mdi:car-back"],
   ["sunroof_control", "switch", "天窗", "mdi:home-roof"],
   ["flash", "button", "闪灯", "mdi:car-light-high"],
   ["honk_flash", "button", "鸣笛闪灯", "mdi:alarm-light-outline"],
+  ["climatization", "button", "温度调节", "mdi:air-conditioner"],
 ];
 
 const LABELS = {
@@ -529,7 +529,6 @@ class VolvoCarCard extends HTMLElement {
     let dynamicLabel = label;
     if (kind === "lock") dynamicLabel = active ? "已锁车" : "未锁车";
     if (key === "engine_control" && active) dynamicLabel = "停止发动机";
-    if (key === "climatization" && active) dynamicLabel = "关闭空调";
     if (key === "tailgate_control" && active) dynamicLabel = "关闭后备箱";
     if (key === "sunroof_control" && active) dynamicLabel = "关闭天窗";
     return `
@@ -622,11 +621,11 @@ class VolvoCarCard extends HTMLElement {
   _actionSuccessMessage(key, service) {
     if (key === "lock") return service === "unlock" ? "解锁指令已发送" : "锁车指令已发送";
     if (key === "engine_control") return service === "turn_on" ? "远程启动指令已发送" : "停止发动机指令已发送";
-    if (key === "climatization") return service === "turn_on" ? "温度调节已开启" : "温度调节已关闭";
     if (key === "tailgate_control") return "后备箱指令已发送";
     if (key === "sunroof_control") return "天窗指令已发送";
     if (key === "flash") return "闪灯指令已发送";
     if (key === "honk_flash") return "鸣笛闪灯指令已发送";
+    if (key === "climatization") return "温度调节指令已发送";
     return "指令已发送";
   }
 
@@ -1221,7 +1220,7 @@ if (!window.customCards.some((card) => card.type === "volvo-car-card")) {
     documentationURL: "https://github.com/Annincikee/hass-volvooncall-cn",
     getEntitySuggestion: (_hass, entityId) => {
       const match = entityId.match(
-        /^(?:lock|sensor|binary_sensor|switch)\.([a-z0-9]+)_(?:lock|engine|climatization|battery_charge_level|full_charge_electric_range|tm_distance|fuel_amount)$/,
+        /^(?:lock|sensor|binary_sensor|switch|button)\.([a-z0-9]+)_(?:lock|engine|climatization|battery_charge_level|full_charge_electric_range|tm_distance|fuel_amount)$/,
       );
       if (!match) return null;
       return {

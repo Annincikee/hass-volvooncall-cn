@@ -25,6 +25,9 @@ async def async_setup_entry(
         buttons.append(VolvoHonkFlashButton(coordinator, idx, "honk_flash_button"))
         buttons.append(VolvoHonkButton(coordinator, idx, "honk_button"))
         buttons.append(VolvoSignInButton(coordinator, idx, "app_sign_in_button"))
+        buttons.append(
+            VolvoClimatizationButton(coordinator, idx, "climatization_button")
+        )
 
     async_add_entities(buttons)
 
@@ -67,3 +70,13 @@ class VolvoSignInButton(VolvoEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         await self.vehicle.sign_in()
+
+
+class VolvoClimatizationButton(VolvoEntity, ButtonEntity):
+    """Press to start parked climatization; it stops on its own."""
+
+    def __init__(self, coordinator, idx, metaMapKey):
+        super().__init__(coordinator, idx, metaMapKey, Platform.BUTTON)
+
+    async def async_press(self) -> None:
+        await self.vehicle.climatization_start()
