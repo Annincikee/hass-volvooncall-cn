@@ -2,25 +2,25 @@
     "domain": "volvooncall_cn",
     "name": "Volvo On Call CN",
     "codeowners": [
-      "@Annincikee",
-      "@idreamshen",
-      "@chliny"
+        "@Annincikee",
+        "@idreamshen",
+        "@chliny"
     ],
     "config_flow": true,
-    "integration_type": "hub",
     "dependencies": [
         "http",
         "lovelace"
     ],
-    "issue_tracker": "https://github.com/Annincikee/hass-volvooncall-cn/issues",
     "documentation": "https://github.com/Annincikee/hass-volvooncall-cn",
+    "integration_type": "hub",
     "iot_class": "cloud_polling",
+    "issue_tracker": "https://github.com/Annincikee/hass-volvooncall-cn/issues",
+    "loggers": [
+        "volvooncall_cn"
+    ],
     "requirements": [
         "grpcio>=1.67.1",
         "protobuf>=6.33.5"
     ],
-    "version": "3.2.2",
-    "loggers": [
-        "volvooncall_cn"
-    ]
+    "version": "3.2.2"
 }
